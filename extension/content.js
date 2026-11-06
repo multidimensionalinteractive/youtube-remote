@@ -8,6 +8,9 @@
   let reconnectTimer = null;
   let statusTimer = null;
 
+  // Intentional YouTube volume (0–1). createMediaElementSource often resets element/player to 100%.
+  let lastKnownVolume = 0.75;
+
   function videoEl() {
     return document.querySelector('video');
   }
@@ -44,13 +47,13 @@
     let paused = true;
     let currentTime = 0;
     let duration = 0;
-    let volume = 1;
+    let volume = lastKnownVolume;
     let muted = false;
     if (v) {
       paused = !!v.paused;
       currentTime = v.currentTime || 0;
       duration = v.duration && isFinite(v.duration) ? v.duration : 0;
-      volume = typeof v.volume === 'number' ? v.volume : 1;
+      if (typeof v.volume === 'number' && isFinite(v.volume)) volume = v.volume;
       muted = !!v.muted;
     }
     if (p && typeof p.getPlayerState === 'function') {
@@ -67,13 +70,30 @@
         if (d && isFinite(d)) duration = d;
       } catch (_) {}
     }
-    if (p && typeof p.getVolume === 'function') {
-      try { volume = (p.getVolume() || 0) / 100; } catch (_) {}
-    }
     if (p && typeof p.isMuted === 'function') {
       try { muted = !!p.isMuted(); } catch (_) {}
     }
     ensureBassGraph();
+    if (bassState.source && bassState.attachedVideo) {
+      // Web Audio path: player/element volume reads are unreliable (often snap to 100%).
+      volume = lastKnownVolume;
+    } else if (p && typeof p.getVolume === 'function') {
+      try {
+        const raw = p.getVolume();
+        if (typeof raw === 'number' && isFinite(raw)) {
+          volume = Math.max(0, Math.min(1, raw / 100));
+          // Do not let a one-off 100% reading poison lastKnownVolume after bass wrap.
+          if (!(Math.round(raw) === 100 && lastKnownVolume < 0.995)) {
+            lastKnownVolume = volume;
+          } else {
+            volume = lastKnownVolume;
+          }
+        }
+      } catch (_) {}
+    } else if (typeof volume === 'number' && isFinite(volume)) {
+      if (!(volume >= 0.995 && lastKnownVolume < 0.995)) lastKnownVolume = volume;
+      else volume = lastKnownVolume;
+    }
     return {
       title: getTitle(),
       channel: getChannel(),
@@ -84,7 +104,7 @@
       duration,
       volume,
       muted,
-      // Bass cut state (parallel to YouTube player volume — does not change element.volume).
+      // Bass cut state (reported alongside volume; filter gain is independent of player volume).
       bass: bassState.amount,
       bassDb: amountToDb(bassState.amount),
       bassHz: BASS_CONFIG.frequencyHz,
@@ -163,6 +183,20 @@
         return true;
       }
       let source = bassState.sources.get(v);
+      // Snapshot intentional volume BEFORE createMediaElementSource (it often resets to 100%).
+      let snap = lastKnownVolume;
+      try {
+        const p0 = player();
+        if (p0 && typeof p0.getVolume === 'function') {
+          const raw = p0.getVolume();
+          if (typeof raw === 'number' && isFinite(raw) && raw > 0 && raw <= 100) {
+            // Prefer lastKnownVolume when we already have a graph-managed session.
+            if (!(bassState.source && Math.round(raw) === 100 && lastKnownVolume < 0.995)) {
+              snap = Math.max(0, Math.min(1, raw / 100));
+            }
+          }
+        }
+      } catch (_) {}
       if (!source) {
         source = bassState.ctx.createMediaElementSource(v);
         bassState.sources.set(v, source);
@@ -173,6 +207,12 @@
       bassState.source = source;
       bassState.attachedVideo = v;
       bassState.filter.gain.value = amountToDb(bassState.amount);
+      try {
+        lastKnownVolume = clamp01(snap);
+        const p1 = player();
+        if (p1 && typeof p1.setVolume === 'function') p1.setVolume(Math.round(lastKnownVolume * 100));
+        v.volume = lastKnownVolume;
+      } catch (_) {}
       bassState.error = null;
       hookVideoPlay(v);
       return true;
@@ -212,6 +252,7 @@
 
   function setVolume(vol) {
     vol = clamp01(vol);
+    lastKnownVolume = vol;
     const v = videoEl();
     const p = player();
     if (p && typeof p.setVolume === 'function') p.setVolume(Math.round(vol * 100));

@@ -150,7 +150,14 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = 'ytRemoteAuthToken';
-const state = { status: null, seeking: false, bridgeConnected: false, bassMaxDb: 30 };
+const state = {
+  status: null,
+  seeking: false,
+  bridgeConnected: false,
+  bassMaxDb: 30,
+  volumeTouching: false,
+  suppressVolumeEvent: false,
+};
 
 function bassAmountToDb(amount) {
   return -state.bassMaxDb * Math.max(0, Math.min(1, Number(amount) || 0));
@@ -216,9 +223,14 @@ function renderStatus(st) {
   if (!state.seeking && dur > 0) {
     $('seek').value = Math.round((cur / dur) * 1000);
   }
-  if (typeof st.volume === 'number') {
-    const v = Math.round(st.volume * 100);
-    $('volume').value = v;
+  if (typeof st.volume === 'number' && !state.volumeTouching) {
+    const v = Math.round(Math.max(0, Math.min(1, st.volume)) * 100);
+    const cur = Number($('volume').value);
+    if (cur !== v) {
+      state.suppressVolumeEvent = true;
+      $('volume').value = String(v);
+      state.suppressVolumeEvent = false;
+    }
     $('volLabel').textContent = String(v);
   }
   $('btnPlay').textContent = st.paused ? 'Play' : 'Pause';
@@ -352,8 +364,18 @@ $('btnNext').onclick = () => command('next');
 $('btnVolDown').onclick = () => command('volumeBy', { delta: -0.05 });
 $('btnVolUp').onclick = () => command('volumeBy', { delta: 0.05 });
 
-$('volume').addEventListener('input', () => { $('volLabel').textContent = $('volume').value; });
+$('volume').addEventListener('pointerdown', () => { state.volumeTouching = true; });
+$('volume').addEventListener('touchstart', () => { state.volumeTouching = true; }, { passive: true });
+$('volume').addEventListener('pointerup', () => { state.volumeTouching = false; });
+$('volume').addEventListener('touchend', () => { state.volumeTouching = false; });
+$('volume').addEventListener('input', () => {
+  if (state.suppressVolumeEvent) return;
+  state.volumeTouching = true;
+  $('volLabel').textContent = $('volume').value;
+});
 $('volume').addEventListener('change', () => {
+  if (state.suppressVolumeEvent) return;
+  state.volumeTouching = false;
   command('setVolume', { volume: Number($('volume').value) / 100 });
 });
 $('bass').addEventListener('input', () => {

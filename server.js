@@ -128,13 +128,21 @@ function requireAuth(req, res, body, { mutating }) {
   return true;
 }
 
+function securityHeaders(extra = {}) {
+  return {
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Content-Security-Policy': "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    // Intentionally omit Access-Control-Allow-Origin: *. Same-origin UI does not need CORS.
+    ...extra,
+  };
+}
+
 function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
-  res.writeHead(code, {
-    'Content-Type': 'application/json',
-    'Cache-Control': 'no-store',
-    // Intentionally omit Access-Control-Allow-Origin: *. Same-origin UI does not need CORS.
-  });
+  res.writeHead(code, securityHeaders({ 'Content-Type': 'application/json' }));
   res.end(body);
 }
 
@@ -374,8 +382,25 @@ function serveStatic(req, res) {
     res.writeHead(403); res.end('Forbidden'); return;
   }
   fs.readFile(filePath, (err, data) => {
-    if (err) { res.writeHead(404); res.end('Not found'); return; }
-    res.writeHead(200, { 'Content-Type': contentType(filePath), 'Cache-Control': 'no-store' });
+    if (err) { res.writeHead(404, securityHeaders()); res.end('Not found'); return; }
+    const type = contentType(filePath);
+    const headers = securityHeaders({ 'Content-Type': type });
+    // Inline UI needs script/style/img/connect to same origin + YouTube thumbnails.
+    if (type.startsWith('text/html')) {
+      headers['Content-Security-Policy'] = [
+        "default-src 'self'",
+        "base-uri 'self'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+        "img-src 'self' https://i.ytimg.com data:",
+        "media-src 'none'",
+        "object-src 'none'",
+        "script-src 'self' 'unsafe-inline'",
+        "style-src 'self' 'unsafe-inline'",
+        "connect-src 'self' ws: wss:",
+      ].join('; ');
+    }
+    res.writeHead(200, headers);
     res.end(data);
   });
 }
@@ -447,17 +472,23 @@ async function handleApi(req, res, pathname) {
 
   try {
     if (pathname === '/api/health' && req.method === 'GET') {
-      // Health is intentionally unauthenticated for local diagnostics; it does not mutate state.
-      sendJson(res, 200, {
+      // Unauthenticated health is intentionally minimal (no now-playing / titles).
+      const payload = {
         ok: true,
         bridgeConnected: state.bridgeConnected || await cdp.isCdpReady(),
-        lastStatus: state.lastStatus,
         lastStatusAt: state.lastStatusAt,
         port: PORT,
         host: HOST,
         lanExposed: config.lanExposed,
         authRequired: !!config.authToken || !!config.lanExposed,
-      });
+      };
+      // Include lastStatus only for loopback or authenticated callers.
+      const body = {};
+      const authed = !!(config.authToken && timingSafeEqualString(getRequestToken(req, body), config.authToken));
+      if (isLoopbackAddress(req.socket.remoteAddress) || authed) {
+        payload.lastStatus = state.lastStatus;
+      }
+      sendJson(res, 200, payload);
       return;
     }
 

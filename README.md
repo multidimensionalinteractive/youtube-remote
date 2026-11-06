@@ -13,9 +13,10 @@ Your phone (or another device) opens a simple mobile UI served by a small Node.j
 - **Search** via `yt-dlp` (`ytsearch`); choosing a result loads the video in the existing YouTube tab and closes duplicate YouTube tabs when the extension bridge is connected
 - **Playback**: play/pause, −10s / +10s seek, previous, next
 - **Now playing** title/channel/thumbnail + seek bar (best with extension)
-- **YouTube player volume** (− / slider / +) separate from **Windows system volume** (− / slider / +)
-- **Bass cut** slider (− / +) via extension Web Audio lowshelf (neutral default; does not change YouTube/system volume)
+- **YouTube player volume** (− / slider / +) separate from **Windows system volume** (− / slider / +); remote UI ignores status volume while you are dragging the slider
+- **Bass cut** slider (− / +) via extension Web Audio lowshelf (neutral default; filter gain is independent of YouTube/system volume)
 - Fallback **basic mode** when the extension is offline (tab title via UI Automation + media keys)
+- **LAN hardening**: loopback default bind, optional shared `authToken`, CSRF Origin/Host checks, Private-profile firewall helper, minimal unauthenticated `/api/health`
 
 ## Architecture
 
@@ -47,7 +48,9 @@ The bridge content script inserts a **Web Audio** graph on the managed YouTube `
 
 **What it is for:** taming excessive low end on **headphones**, laptop speakers, or a desktop near-field setup without turning down the whole mix. It is a *cut* control, not a loudness / YouTube volume replacement.
 
-**What it does not do:** it does not change YouTube’s player volume, Windows system volume, seek position, or now-playing metadata APIs. Status reports `bass`, `bassDb`, `bassHz`, and `bassMaxDb` alongside `volume` so the phone UI stays in sync.
+**What it does not do:** it is not a replacement for YouTube or Windows volume. Seek, now-playing, and Premium playback continue through the normal player. Status reports `bass`, `bassDb`, `bassHz`, and `bassMaxDb` alongside `volume` so the phone UI stays in sync.
+
+**Volume interaction (verified bug fix):** `createMediaElementSource()` can reset the media element / player volume to **100%**. Before wrapping, the extension snapshots the intentional volume into `lastKnownVolume`, restores player + element volume after attach, and while the bass graph is active reports `lastKnownVolume` instead of polluted live reads. One-off anomalous 100% readings are ignored. The mobile UI also skips applying status volume updates during pointer/touch on the volume slider and suppresses programmatic `input`/`change` feedback when it updates the control itself.
 
 **Resilience (verified approach):**
 
@@ -175,8 +178,10 @@ If you already run a machine-specific install that binds `0.0.0.0:8790` without 
 - Action allowlist (no arbitrary command/shell endpoint)
 - YouTube HTTPS URL validation before navigation helpers
 - Bridge websocket accepted from loopback only
-- Extension permissions scoped to YouTube + local app endpoints
+- Extension permissions scoped to YouTube + local app endpoints (`tabs` only + host allowlist)
 - Fixed PowerShell scripts only (path-checked under `scripts/`)
+- Baseline security headers (`X-Content-Type-Options`, `X-Frame-Options`, CSP); no `Access-Control-Allow-Origin: *`
+- Unauthenticated `/api/health` omits now-playing `lastStatus` (loopback or token required for that detail)
 
 ## Troubleshooting
 
@@ -206,7 +211,7 @@ npm test
 node --check server.js
 ```
 
-`npm test` covers bass math (including the live-verified `0.4 → −12 dB` mapping), content-script wiring assertions, and UI control presence — **without** launching Chrome or touching a real browser profile.
+`npm test` covers bass math (including the live-verified `0.4 → −12 dB` mapping), volume snapshot/restore + anomalous-100% handling, content-script wiring assertions, and UI control presence — **without** launching Chrome or touching a real browser profile.
 
 End-to-end playback (extension bridge on a signed-in YouTube/Premium tab, UIA focus, system volume, phone-on-LAN) depends on a Windows desktop with Chrome. This packaging pass does **not** attach to or modify an operator’s everyday Chrome profile. Treat LAN exposure carefully and verify on your own network before relying on it.
 
