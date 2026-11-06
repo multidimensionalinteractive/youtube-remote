@@ -8,7 +8,8 @@
   let reconnectTimer = null;
   let statusTimer = null;
 
-  // Intentional YouTube volume (0–1). createMediaElementSource often resets element/player to 100%.
+  // Desired loudness (0–1). While the Web Audio graph is active, GainNode is the authority —
+  // element/player volume reads after createMediaElementSource are not trustworthy.
   let lastKnownVolume = 0.75;
 
   function videoEl() {
@@ -74,25 +75,20 @@
       try { muted = !!p.isMuted(); } catch (_) {}
     }
     ensureBassGraph();
-    if (bassState.source && bassState.attachedVideo) {
-      // Web Audio path: player/element volume reads are unreliable (often snap to 100%).
-      volume = lastKnownVolume;
+    if (bassState.gain) {
+      // Read the actual GainNode — do not lie with a cached lastKnownVolume while graph is live.
+      volume = clamp01(bassState.gain.gain.value);
+      lastKnownVolume = volume;
     } else if (p && typeof p.getVolume === 'function') {
       try {
         const raw = p.getVolume();
         if (typeof raw === 'number' && isFinite(raw)) {
           volume = Math.max(0, Math.min(1, raw / 100));
-          // Do not let a one-off 100% reading poison lastKnownVolume after bass wrap.
-          if (!(Math.round(raw) === 100 && lastKnownVolume < 0.995)) {
-            lastKnownVolume = volume;
-          } else {
-            volume = lastKnownVolume;
-          }
+          lastKnownVolume = volume;
         }
       } catch (_) {}
     } else if (typeof volume === 'number' && isFinite(volume)) {
-      if (!(volume >= 0.995 && lastKnownVolume < 0.995)) lastKnownVolume = volume;
-      else volume = lastKnownVolume;
+      lastKnownVolume = volume;
     }
     return {
       title: getTitle(),
@@ -104,12 +100,13 @@
       duration,
       volume,
       muted,
-      // Bass cut state (reported alongside volume; filter gain is independent of player volume).
       bass: bassState.amount,
       bassDb: amountToDb(bassState.amount),
       bassHz: BASS_CONFIG.frequencyHz,
       bassMaxDb: BASS_CONFIG.maxCutDb,
       bassError: bassState.error,
+      bassAttached: !!(bassState.source && bassState.attachedVideo),
+      gain: bassState.gain ? bassState.gain.gain.value : null,
     };
   }
 
@@ -132,12 +129,12 @@
     amount: BASS_CONFIG.defaultAmount,
     ctx: null,
     filter: null,
+    gain: null,
     source: null,
     attachedVideo: null,
     error: null,
     // Persist MediaElementSource nodes per <video> — createMediaElementSource may only be called once per element.
     sources: (window.__ytRemoteBassSources = window.__ytRemoteBassSources || new WeakMap()),
-    playHooked: null,
   };
   try {
     const saved = sessionStorage.getItem(BASS_KEY);
@@ -152,14 +149,21 @@
     return Object.is(db, -0) ? 0 : db;
   }
 
-  function hookVideoPlay(v) {
-    if (!v || bassState.playHooked === v) return;
-    bassState.playHooked = v;
-    // Chrome often starts AudioContext suspended until a user/media gesture.
-    v.addEventListener('play', () => { resumeBassContext(); }, { passive: true });
+  function clampAllVideoVolumes() {
+    // Close the pre-wrap blast window: new YouTube <video> elements default to 1.0.
+    try {
+      document.querySelectorAll('video').forEach((el) => {
+        try {
+          if (typeof el.volume === 'number' && Math.abs(el.volume - lastKnownVolume) > 0.01) {
+            el.volume = lastKnownVolume;
+          }
+        } catch (_) {}
+      });
+    } catch (_) {}
   }
 
   function ensureBassGraph() {
+    clampAllVideoVolumes();
     const v = videoEl();
     if (!v) return false;
     try {
@@ -171,50 +175,46 @@
         bassState.filter.frequency.value = BASS_CONFIG.frequencyHz;
         bassState.filter.Q.value = BASS_CONFIG.q;
         bassState.filter.gain.value = amountToDb(bassState.amount);
-        bassState.filter.connect(bassState.ctx.destination);
-      } else if (bassState.filter) {
-        // Keep tunable settings applied if config constants change across extension reloads.
+        bassState.gain = bassState.ctx.createGain();
+        bassState.gain.gain.value = lastKnownVolume;
+        bassState.filter.connect(bassState.gain);
+        bassState.gain.connect(bassState.ctx.destination);
+      }
+      if (!bassState.gain) {
+        bassState.gain = bassState.ctx.createGain();
+        bassState.gain.gain.value = lastKnownVolume;
+        try { bassState.filter.disconnect(); } catch (_) {}
+        bassState.filter.connect(bassState.gain);
+        bassState.gain.connect(bassState.ctx.destination);
+      }
+      // Keep tunable filter settings + gain node as sole loudness authority while graph is active.
+      if (bassState.filter) {
         bassState.filter.frequency.value = BASS_CONFIG.frequencyHz;
         bassState.filter.Q.value = BASS_CONFIG.q;
-      }
-      if (bassState.attachedVideo === v && bassState.source) {
         bassState.filter.gain.value = amountToDb(bassState.amount);
-        hookVideoPlay(v);
+      }
+      bassState.gain.gain.value = lastKnownVolume;
+
+      if (bassState.attachedVideo === v && bassState.source) {
         return true;
       }
+
       let source = bassState.sources.get(v);
-      // Snapshot intentional volume BEFORE createMediaElementSource (it often resets to 100%).
-      let snap = lastKnownVolume;
-      try {
-        const p0 = player();
-        if (p0 && typeof p0.getVolume === 'function') {
-          const raw = p0.getVolume();
-          if (typeof raw === 'number' && isFinite(raw) && raw > 0 && raw <= 100) {
-            // Prefer lastKnownVolume when we already have a graph-managed session.
-            if (!(bassState.source && Math.round(raw) === 100 && lastKnownVolume < 0.995)) {
-              snap = Math.max(0, Math.min(1, raw / 100));
-            }
-          }
-        }
-      } catch (_) {}
+      // Attenuate element before capture so default-route blasts are quieter if wrap lags.
+      try { v.volume = lastKnownVolume; } catch (_) {}
       if (!source) {
         source = bassState.ctx.createMediaElementSource(v);
         bassState.sources.set(v, source);
       }
-      // YouTube may replace the <video> node; disconnect previous source from the shared filter only.
       try { if (bassState.source && bassState.source !== source) bassState.source.disconnect(); } catch (_) {}
       source.connect(bassState.filter);
       bassState.source = source;
       bassState.attachedVideo = v;
-      bassState.filter.gain.value = amountToDb(bassState.amount);
-      try {
-        lastKnownVolume = clamp01(snap);
-        const p1 = player();
-        if (p1 && typeof p1.setVolume === 'function') p1.setVolume(Math.round(lastKnownVolume * 100));
-        v.volume = lastKnownVolume;
-      } catch (_) {}
+      // After MediaElementSource, element.volume no longer drives speakers reliably.
+      // Drive loudness only through GainNode; leave element at 1 to avoid double attenuation confusion.
+      try { v.volume = 1; } catch (_) {}
+      bassState.gain.gain.value = lastKnownVolume;
       bassState.error = null;
-      hookVideoPlay(v);
       return true;
     } catch (e) {
       bassState.error = e && e.message ? e.message : String(e);
@@ -237,8 +237,21 @@
     return resumeBassContext();
   }
 
-  // Reattach when YouTube swaps the media element (SPA navigations / ads / Quality changes).
-  setInterval(() => { try { ensureBassGraph(); } catch (_) {} }, 2000);
+  // Backup reattach / clamp (YouTube SPA / ads / quality swaps). Faster than relying on MutationObserver alone.
+  setInterval(() => { try { ensureBassGraph(); } catch (_) {} }, 500);
+  document.addEventListener('play', (ev) => {
+    try {
+      if (ev.target && (ev.target.tagName === 'VIDEO' || ev.target.tagName === 'AUDIO')) {
+        clampAllVideoVolumes();
+        ensureBassGraph();
+        resumeBassContext();
+      }
+    } catch (_) {}
+  }, true);
+  try {
+    const mo = new MutationObserver(() => { try { clampAllVideoVolumes(); ensureBassGraph(); } catch (_) {} });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  } catch (_) {}
 
   // Soft cleanup: suspend processing on tab hide; do not close the context (Premium/playback continuity).
   window.addEventListener('pagehide', () => {
@@ -253,6 +266,17 @@
   function setVolume(vol) {
     vol = clamp01(vol);
     lastKnownVolume = vol;
+    ensureBassGraph();
+    if (bassState.gain) {
+      try { bassState.gain.gain.value = vol; } catch (_) {}
+      // Element volume left at 1 while graph controls loudness.
+      const v = videoEl();
+      if (v) {
+        try { v.volume = 1; } catch (_) {}
+        if (vol > 0 && v.muted) v.muted = false;
+      }
+      return;
+    }
     const v = videoEl();
     const p = player();
     if (p && typeof p.setVolume === 'function') p.setVolume(Math.round(vol * 100));

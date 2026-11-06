@@ -13,8 +13,8 @@ Your phone (or another device) opens a simple mobile UI served by a small Node.j
 - **Search** via `yt-dlp` (`ytsearch`); choosing a result loads the video in the existing YouTube tab and closes duplicate YouTube tabs when the extension bridge is connected
 - **Playback**: play/pause, −10s / +10s seek, previous, next
 - **Now playing** title/channel/thumbnail + seek bar (best with extension)
-- **YouTube player volume** (− / slider / +) separate from **Windows system volume** (− / slider / +); remote UI ignores status volume while you are dragging the slider
-- **Bass cut** slider (− / +) via extension Web Audio lowshelf (neutral default; filter gain is independent of YouTube/system volume)
+- **YouTube loudness** (− / slider / +) via persistent Web Audio **GainNode** when the bridge is attached (separate from **Windows system volume**); remote UI ignores status volume while you are dragging the slider
+- **Bass cut** slider (− / +) via lowshelf filter (neutral default; independent of GainNode loudness / system volume)
 - Fallback **basic mode** when the extension is offline (tab title via UI Automation + media keys)
 - **LAN hardening**: loopback default bind, optional shared `authToken`, CSRF Origin/Host checks, Private-profile firewall helper, minimal unauthenticated `/api/health`
 
@@ -37,7 +37,7 @@ Phone browser  --HTTP/WS-->  Node server (server.js)  --WS-->  Chrome extension 
 
 The bridge content script inserts a **Web Audio** graph on the managed YouTube `<video>` element:
 
-`HTMLMediaElement` → `MediaElementAudioSourceNode` → **lowshelf** `BiquadFilterNode` → `AudioContext.destination`
+`HTMLMediaElement` → `MediaElementAudioSourceNode` → **lowshelf** `BiquadFilterNode` → **`GainNode`** → `AudioContext.destination`
 
 | Control | Behavior |
 |---|---|
@@ -50,14 +50,20 @@ The bridge content script inserts a **Web Audio** graph on the managed YouTube `
 
 **What it does not do:** it is not a replacement for YouTube or Windows volume. Seek, now-playing, and Premium playback continue through the normal player. Status reports `bass`, `bassDb`, `bassHz`, and `bassMaxDb` alongside `volume` so the phone UI stays in sync.
 
-**Volume interaction (verified bug fix):** `createMediaElementSource()` can reset the media element / player volume to **100%**. Before wrapping, the extension snapshots the intentional volume into `lastKnownVolume`, restores player + element volume after attach, and while the bass graph is active reports `lastKnownVolume` instead of polluted live reads. One-off anomalous 100% readings are ignored. The mobile UI also skips applying status volume updates during pointer/touch on the volume slider and suppresses programmatic `input`/`change` feedback when it updates the control itself.
+**Volume architecture (verified):** Filtering polluted element/player reads with `lastKnownVolume` alone is **not sufficient**. A newly inserted YouTube `<video>` can still play at real **100%** on the default audio route before the bass graph re-wraps, while the remote UI showed a lower cached value and Windows system volume stayed unchanged. The decisive fix adds a persistent **`GainNode`** as the loudness authority:
+
+- Chain: source → lowshelf → **gain** → destination
+- Remote volume slider / `setVolume` write **`GainNode.gain`** (status reports that real value, plus `gain` / `bassAttached`)
+- New `<video>` elements are **clamped immediately** toward the desired loudness to shrink the pre-wrap blast window
+- Wrap runs on **`play` (capture)**, a **`MutationObserver`**, and a **500ms** backup interval
+- After wrap, element `.volume` is left at `1` so loudness is not double-attenuated; bass cut remains independent lowshelf gain (e.g. amount `0.75` → **−22.5 dB**)
+- Mobile UI still ignores status volume updates during pointer/touch and suppresses programmatic slider feedback
 
 **Resilience (verified approach):**
 
-- Sources are remembered in a `WeakMap` so `createMediaElementSource` is only called once per element; when YouTube replaces the `<video>`, the filter reconnects
-- A short interval re-runs `ensureBassGraph()` for SPA / ads / quality swaps
-- `AudioContext.resume()` runs on play gestures and when the tab becomes visible again (Chrome autoplay / suspended context)
-- Amount persists for the tab via `sessionStorage`
+- Sources are remembered in a `WeakMap` so `createMediaElementSource` is only called once per element; when YouTube replaces the `<video>`, the source reconnects to the shared filter/gain
+- `AudioContext.resume()` runs on media play gestures and when the tab becomes visible again (Chrome autoplay / suspended context)
+- Bass amount persists for the tab via `sessionStorage`
 - On `pagehide`, the context is suspended (not torn down) to avoid breaking ongoing playback plumbing
 
 Tune `BASS_CONFIG` in `extension/content.js` (mirror defaults live in `lib/bass.js` for tests). No remote CDN or extra extension permissions are required for bass — only the existing YouTube + local bridge host permissions, plus `tabs` for focus/cleanup helpers.
@@ -211,7 +217,7 @@ npm test
 node --check server.js
 ```
 
-`npm test` covers bass math (including the live-verified `0.4 → −12 dB` mapping), volume snapshot/restore + anomalous-100% handling, content-script wiring assertions, and UI control presence — **without** launching Chrome or touching a real browser profile.
+`npm test` covers bass math (including the live-verified `0.4 → −12 dB` mapping), persistent GainNode loudness / media-swap volume behavior, content-script wiring assertions, and UI control presence — **without** launching Chrome or touching a real browser profile.
 
 End-to-end playback (extension bridge on a signed-in YouTube/Premium tab, UIA focus, system volume, phone-on-LAN) depends on a Windows desktop with Chrome. This packaging pass does **not** attach to or modify an operator’s everyday Chrome profile. Treat LAN exposure carefully and verify on your own network before relying on it.
 

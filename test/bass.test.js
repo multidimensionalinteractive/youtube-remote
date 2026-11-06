@@ -46,18 +46,21 @@ describe('extension content script bass wiring', () => {
   const content = fs.readFileSync(path.join(__dirname, '..', 'extension', 'content.js'), 'utf8');
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'extension', 'manifest.json'), 'utf8'));
 
-  it('uses MediaElementSource → lowshelf → destination chain', () => {
+  it('uses MediaElementSource → lowshelf → GainNode → destination chain', () => {
     assert.match(content, /createMediaElementSource/);
     assert.match(content, /createBiquadFilter/);
+    assert.match(content, /createGain/);
     assert.match(content, /type\s*=\s*['"]lowshelf['"]/);
-    assert.match(content, /\.connect\(bassState\.ctx\.destination\)/);
+    assert.match(content, /filter\.connect\(bassState\.gain\)/);
+    assert.match(content, /gain\.connect\(bassState\.ctx\.destination\)/);
     assert.match(content, /frequencyHz:\s*200/);
     assert.match(content, /maxCutDb:\s*30/);
   });
 
-  it('preserves sources across video element replacement via WeakMap', () => {
+  it('preserves sources across video element replacement via WeakMap + observers', () => {
     assert.match(content, /WeakMap/);
     assert.match(content, /__ytRemoteBassSources/);
+    assert.match(content, /MutationObserver/);
     assert.match(content, /setInterval\(\s*\(\)\s*=>\s*\{\s*try\s*\{\s*ensureBassGraph/);
   });
 
