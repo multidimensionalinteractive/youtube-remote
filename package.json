@@ -6,6 +6,7 @@
   "license": "MIT",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test test/*.test.js",
     "install-autostart": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\install-autostart.ps1",
     "install-startup": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\install-startup-folder.ps1",
     "open-firewall": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\open-firewall.ps1"

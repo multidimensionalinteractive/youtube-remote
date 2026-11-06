@@ -134,13 +134,13 @@
         <div class="meta" style="margin-top:6px;">Volume: <span id="sysLabel">Reading…</span></div>
       </div>
       <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
-        <div class="meta">Bass <span id="bassState">needs extension</span></div>
+        <div class="meta">Bass cut <span id="bassState">needs extension</span></div>
         <div class="volrow" style="margin-top:12px;">
-          <button id="bassDown" type="button" style="min-width:52px;">-</button>
-          <input id="bass" class="seek" type="range" min="0" max="100" value="0" />
-          <button id="bassUp" type="button" style="min-width:52px;">+</button>
+          <button id="bassDown" type="button" style="min-width:52px;" title="Less bass cut">−</button>
+          <input id="bass" class="seek" type="range" min="0" max="100" value="0" aria-label="Bass cut" />
+          <button id="bassUp" type="button" style="min-width:52px;" title="More bass cut">+</button>
         </div>
-        <div class="meta" style="margin-top:6px;">Cut: <span id="bassLabel">0</span> dB</div>
+        <div class="meta" style="margin-top:6px;">Cut: <span id="bassLabel">0</span> dB <span id="bassHzHint" style="opacity:.7;"></span></div>
       </div>
     </div>
 
@@ -150,7 +150,11 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = 'ytRemoteAuthToken';
-const state = { status: null, seeking: false, bridgeConnected: false };
+const state = { status: null, seeking: false, bridgeConnected: false, bassMaxDb: 30 };
+
+function bassAmountToDb(amount) {
+  return -state.bassMaxDb * Math.max(0, Math.min(1, Number(amount) || 0));
+}
 
 function getToken() {
   try {
@@ -218,11 +222,15 @@ function renderStatus(st) {
     $('volLabel').textContent = String(v);
   }
   $('btnPlay').textContent = st.paused ? 'Play' : 'Pause';
+  if (typeof st.bassMaxDb === 'number' && st.bassMaxDb > 0) state.bassMaxDb = st.bassMaxDb;
   if (typeof st.bass === 'number') {
     const pct = Math.round(st.bass * 100);
     $('bass').value = pct;
-    const db = typeof st.bassDb === 'number' ? st.bassDb : (-30 * st.bass);
+    const db = typeof st.bassDb === 'number' ? st.bassDb : bassAmountToDb(st.bass);
     $('bassLabel').textContent = String(Math.round(db));
+  }
+  if (typeof st.bassHz === 'number') {
+    $('bassHzHint').textContent = '(lowshelf ~' + Math.round(st.bassHz) + ' Hz)';
   }
   if (st.bassError) $('bassState').textContent = 'unavailable';
   else if (state.bridgeConnected) $('bassState').textContent = '';
@@ -349,8 +357,7 @@ $('volume').addEventListener('change', () => {
   command('setVolume', { volume: Number($('volume').value) / 100 });
 });
 $('bass').addEventListener('input', () => {
-  const db = -30 * (Number($('bass').value) / 100);
-  $('bassLabel').textContent = String(Math.round(db));
+  $('bassLabel').textContent = String(Math.round(bassAmountToDb(Number($('bass').value) / 100)));
 });
 $('bass').addEventListener('change', () => {
   command('setBass', { amount: Number($('bass').value) / 100 });

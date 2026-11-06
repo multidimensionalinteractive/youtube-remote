@@ -14,7 +14,7 @@ Your phone (or another device) opens a simple mobile UI served by a small Node.j
 - **Playback**: play/pause, −10s / +10s seek, previous, next
 - **Now playing** title/channel/thumbnail + seek bar (best with extension)
 - **YouTube player volume** (− / slider / +) separate from **Windows system volume** (− / slider / +)
-- **Bass cut** control (extension / Web Audio lowshelf; best-effort)
+- **Bass cut** slider (− / +) via extension Web Audio lowshelf (neutral default; does not change YouTube/system volume)
 - Fallback **basic mode** when the extension is offline (tab title via UI Automation + media keys)
 
 ## Architecture
@@ -31,6 +31,35 @@ Phone browser  --HTTP/WS-->  Node server (server.js)  --WS-->  Chrome extension 
 - **`extension/`** MV3 unpacked extension: content script connects to `ws://127.0.0.1:8790/?role=bridge` and executes player actions.
 - **`scripts/*.ps1`** are fixed helpers invoked by the server (not arbitrary shell from the network).
 - Search shells out to **`yt-dlp`** only with a constructed `ytsearchN:query` invocation (no free-form shell).
+
+## Bass cut (extension)
+
+The bridge content script inserts a **Web Audio** graph on the managed YouTube `<video>` element:
+
+`HTMLMediaElement` → `MediaElementAudioSourceNode` → **lowshelf** `BiquadFilterNode` → `AudioContext.destination`
+
+| Control | Behavior |
+|---|---|
+| Slider amount `0` | Neutral — filter gain **0 dB** (default) |
+| Slider amount `1` | Maximum cut — **−30 dB** lowshelf (configurable in `extension/content.js` → `BASS_CONFIG.maxCutDb`) |
+| Corner frequency | **200 Hz** by default (intended band ~150–250 Hz) |
+| − / + buttons | Step amount by `0.05` (`bassBy`) |
+
+**What it is for:** taming excessive low end on **headphones**, laptop speakers, or a desktop near-field setup without turning down the whole mix. It is a *cut* control, not a loudness / YouTube volume replacement.
+
+**What it does not do:** it does not change YouTube’s player volume, Windows system volume, seek position, or now-playing metadata APIs. Status reports `bass`, `bassDb`, `bassHz`, and `bassMaxDb` alongside `volume` so the phone UI stays in sync.
+
+**Resilience (verified approach):**
+
+- Sources are remembered in a `WeakMap` so `createMediaElementSource` is only called once per element; when YouTube replaces the `<video>`, the filter reconnects
+- A short interval re-runs `ensureBassGraph()` for SPA / ads / quality swaps
+- `AudioContext.resume()` runs on play gestures and when the tab becomes visible again (Chrome autoplay / suspended context)
+- Amount persists for the tab via `sessionStorage`
+- On `pagehide`, the context is suspended (not torn down) to avoid breaking ongoing playback plumbing
+
+Tune `BASS_CONFIG` in `extension/content.js` (mirror defaults live in `lib/bass.js` for tests). No remote CDN or extra extension permissions are required for bass — only the existing YouTube + local bridge host permissions, plus `tabs` for focus/cleanup helpers.
+
+Reload the unpacked extension after changing `BASS_CONFIG` or `content.js`.
 
 ## Requirements
 
@@ -172,7 +201,14 @@ UI Automation helpers need a normal interactive desktop session (not a headless 
 
 ## Development / verification assumptions
 
-Syntax checks (`node --check`) are expected to pass on the published JS. End-to-end behavior (extension bridge, UIA focus, system volume, phone-on-LAN) depends on a Windows desktop with Chrome and was **not** re-field-tested against every generic hardware/network combination in this packaging pass. Treat LAN exposure carefully and verify on your own network before relying on it.
+```bat
+npm test
+node --check server.js
+```
+
+`npm test` covers bass math (including the live-verified `0.4 → −12 dB` mapping), content-script wiring assertions, and UI control presence — **without** launching Chrome or touching a real browser profile.
+
+End-to-end playback (extension bridge on a signed-in YouTube/Premium tab, UIA focus, system volume, phone-on-LAN) depends on a Windows desktop with Chrome. This packaging pass does **not** attach to or modify an operator’s everyday Chrome profile. Treat LAN exposure carefully and verify on your own network before relying on it.
 
 ## License
 

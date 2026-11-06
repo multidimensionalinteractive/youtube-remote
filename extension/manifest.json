@@ -1,13 +1,10 @@
 {
   "manifest_version": 3,
   "name": "YouTube Remote Bridge",
-  "version": "1.0.0",
-  "description": "Bridges the local YouTube Remote control page to the active YouTube tab.",
+  "version": "1.1.0",
+  "description": "Bridges the local YouTube Remote control page to the active YouTube tab, including optional Web Audio bass cut.",
   "permissions": [
-    "tabs",
-    "scripting",
-    "storage",
-    "alarms"
+    "tabs"
   ],
   "host_permissions": [
     "*://www.youtube.com/*",

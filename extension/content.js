@@ -84,8 +84,11 @@
       duration,
       volume,
       muted,
+      // Bass cut state (parallel to YouTube player volume — does not change element.volume).
       bass: bassState.amount,
       bassDb: amountToDb(bassState.amount),
+      bassHz: BASS_CONFIG.frequencyHz,
+      bassMaxDb: BASS_CONFIG.maxCutDb,
       bassError: bassState.error,
     };
   }
@@ -96,27 +99,44 @@
     return Math.max(0, Math.min(1, n));
   }
 
+  // Keep in sync with lib/bass.js BASS_DEFAULTS (no bundler; content script is standalone).
+  const BASS_CONFIG = {
+    frequencyHz: 200, // lowshelf corner; sensible desktop/headphone range ~150–250 Hz
+    maxCutDb: 30,     // amount 0 → 0 dB (neutral); amount 1 → -maxCutDb
+    defaultAmount: 0,
+    q: 0.7,
+  };
 
   const BASS_KEY = 'ytRemoteBassAmount';
   const bassState = {
-    amount: 0,
+    amount: BASS_CONFIG.defaultAmount,
     ctx: null,
     filter: null,
     source: null,
     attachedVideo: null,
     error: null,
+    // Persist MediaElementSource nodes per <video> — createMediaElementSource may only be called once per element.
     sources: (window.__ytRemoteBassSources = window.__ytRemoteBassSources || new WeakMap()),
+    playHooked: null,
   };
   try {
     const saved = sessionStorage.getItem(BASS_KEY);
     if (saved != null && saved !== '') {
       const n = Number(saved);
-      if (isFinite(n)) bassState.amount = Math.max(0, Math.min(1, n));
+      if (isFinite(n)) bassState.amount = clamp01(n);
     }
   } catch (_) {}
 
   function amountToDb(amount) {
-    return -30 * clamp01(amount);
+    const db = -BASS_CONFIG.maxCutDb * clamp01(amount);
+    return Object.is(db, -0) ? 0 : db;
+  }
+
+  function hookVideoPlay(v) {
+    if (!v || bassState.playHooked === v) return;
+    bassState.playHooked = v;
+    // Chrome often starts AudioContext suspended until a user/media gesture.
+    v.addEventListener('play', () => { resumeBassContext(); }, { passive: true });
   }
 
   function ensureBassGraph() {
@@ -128,13 +148,18 @@
         bassState.ctx = new AC();
         bassState.filter = bassState.ctx.createBiquadFilter();
         bassState.filter.type = 'lowshelf';
-        bassState.filter.frequency.value = 200;
-        bassState.filter.Q.value = 0.7;
+        bassState.filter.frequency.value = BASS_CONFIG.frequencyHz;
+        bassState.filter.Q.value = BASS_CONFIG.q;
         bassState.filter.gain.value = amountToDb(bassState.amount);
         bassState.filter.connect(bassState.ctx.destination);
+      } else if (bassState.filter) {
+        // Keep tunable settings applied if config constants change across extension reloads.
+        bassState.filter.frequency.value = BASS_CONFIG.frequencyHz;
+        bassState.filter.Q.value = BASS_CONFIG.q;
       }
       if (bassState.attachedVideo === v && bassState.source) {
         bassState.filter.gain.value = amountToDb(bassState.amount);
+        hookVideoPlay(v);
         return true;
       }
       let source = bassState.sources.get(v);
@@ -142,12 +167,14 @@
         source = bassState.ctx.createMediaElementSource(v);
         bassState.sources.set(v, source);
       }
+      // YouTube may replace the <video> node; disconnect previous source from the shared filter only.
       try { if (bassState.source && bassState.source !== source) bassState.source.disconnect(); } catch (_) {}
       source.connect(bassState.filter);
       bassState.source = source;
       bassState.attachedVideo = v;
       bassState.filter.gain.value = amountToDb(bassState.amount);
       bassState.error = null;
+      hookVideoPlay(v);
       return true;
     } catch (e) {
       bassState.error = e && e.message ? e.message : String(e);
@@ -170,7 +197,18 @@
     return resumeBassContext();
   }
 
+  // Reattach when YouTube swaps the media element (SPA navigations / ads / Quality changes).
   setInterval(() => { try { ensureBassGraph(); } catch (_) {} }, 2000);
+
+  // Soft cleanup: suspend processing on tab hide; do not close the context (Premium/playback continuity).
+  window.addEventListener('pagehide', () => {
+    try {
+      if (bassState.ctx && bassState.ctx.state === 'running') bassState.ctx.suspend();
+    } catch (_) {}
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') resumeBassContext();
+  });
 
   function setVolume(vol) {
     vol = clamp01(vol);
