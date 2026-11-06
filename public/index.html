@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="theme-color" content="#0b0b0f" />
+<title>YouTube Remote</title>
+<style>
+  :root {
+    --bg: #0b0b0f;
+    --card: #16161d;
+    --card2: #1e1e28;
+    --text: #f2f2f7;
+    --muted: #9a9aab;
+    --accent: #ff2d55;
+    --accent2: #ff453a;
+    --good: #30d158;
+    --border: #2a2a36;
+    --shadow: 0 10px 30px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { min-height: 100dvh; padding: 16px; padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+  .wrap { max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  h1 { font-size: 1.25rem; margin: 0; letter-spacing: -0.02em; }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--muted); background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
+  .dot.on { background: var(--good); box-shadow: 0 0 10px rgba(48,209,88,.6); }
+  .dot.off { background: var(--accent2); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 18px; padding: 14px; box-shadow: var(--shadow); }
+  .now { display: grid; grid-template-columns: 96px 1fr; gap: 12px; align-items: center; }
+  .thumb { width: 96px; height: 54px; border-radius: 10px; object-fit: cover; background: #000; }
+  .title { font-weight: 650; line-height: 1.25; margin: 0 0 4px; }
+  .meta { color: var(--muted); font-size: 0.85rem; }
+  input[type="search"], input[type="text"], input[type="password"], input[type="range"] { width: 100%; }
+  input[type="search"], input[type="text"], input[type="password"] {
+    background: var(--card2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 14px; padding: 12px 14px; font-size: 1rem; outline: none;
+  }
+  input:focus { border-color: #555; }
+  button {
+    appearance: none; border: 0; border-radius: 14px; padding: 12px 14px;
+    background: var(--card2); color: var(--text); font-weight: 650; font-size: 0.95rem;
+    cursor: pointer; min-height: 44px;
+  }
+  button.primary { background: linear-gradient(135deg, var(--accent), var(--accent2)); }
+  button:active { transform: scale(0.98); }
+  button:disabled { opacity: 0.45; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .seek { width: 100%; accent-color: var(--accent); }
+  .results { display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow: auto; }
+  .result { display: grid; grid-template-columns: 112px 1fr; gap: 10px; padding: 8px; border-radius: 14px; background: var(--card2); border: 1px solid transparent; text-align: left; width: 100%; }
+  .result:hover, .result:focus { border-color: #444; }
+  .result img { width: 112px; height: 63px; border-radius: 10px; object-fit: cover; background: #000; }
+  .result .t { font-size: 0.92rem; font-weight: 650; margin: 0 0 4px; }
+  .result .c { color: var(--muted); font-size: 0.8rem; }
+  .err { color: #ff8a80; font-size: 0.85rem; white-space: pre-wrap; }
+  .hint { color: var(--muted); font-size: 0.8rem; line-height: 1.4; }
+  .volrow { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; }
+  .authbox { display: none; }
+  .authbox.show { display: block; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 style="text-align:center;width:100%;margin:4px 0;">YouTube Remote</h1>
+    <div class="row" style="justify-content:center;flex-wrap:wrap;">
+      <button id="btnRefresh" type="button" class="pill" title="Tap to wake PC, show YouTube and refresh" aria-label="Connection status, tap to wake PC, show YouTube and refresh" style="cursor:pointer;"><span id="dot" class="dot off"></span><span id="bridgeLabel">Bridge offline</span><span aria-hidden="true" style="opacity:.55;">↻</span></button>
+    </div>
+
+    <div id="authBox" class="card authbox">
+      <div class="meta" style="margin-bottom:8px;">This server requires an access token (LAN mode). Paste the same value as <code>authToken</code> / <code>YT_REMOTE_AUTH_TOKEN</code>.</div>
+      <form id="authForm" class="row">
+        <input id="authToken" type="password" placeholder="Access token" autocomplete="off" style="flex:1;" />
+        <button class="primary" type="submit">Save</button>
+      </form>
+      <div id="authErr" class="err" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <form id="searchForm" class="row">
+        <input id="q" type="search" placeholder="Search YouTube" enterkeyhint="search" required style="flex:1;" />
+        <button class="primary" type="submit">Search</button>
+      </form>
+      <div id="searchErr" class="err" style="margin-top:8px;"></div>
+      <div id="results" class="results" style="margin-top:10px;"></div>
+      <p class="hint" style="margin-top:10px;">Tip: keep a YouTube tab open on the PC. Choosing a result loads it in that tab and closes duplicate YouTube tabs when the extension bridge is connected.</p>
+    </div>
+
+    <div class="card">
+      <div class="now">
+        <img id="nowThumb" class="thumb" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='54'%3E%3Crect width='100%25' height='100%25' fill='%23000'/%3E%3C/svg%3E" />
+        <div>
+          <p class="title" id="nowTitle">Nothing playing</p>
+          <div class="meta" id="nowMeta">Open YouTube on the PC and load the extension</div>
+        </div>
+      </div>
+      <div style="margin-top:12px;">
+        <input id="seek" class="seek" type="range" min="0" max="1000" value="0" />
+        <div class="row" style="justify-content:space-between; margin-top:4px;">
+          <span class="meta" id="tCur">0:00</span>
+          <span class="meta" id="tDur">0:00</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="grid">
+        <button id="btnBack" type="button">-10s</button>
+        <button id="btnPlay" class="primary" type="button">Play/Pause</button>
+        <button id="btnFwd" type="button">+10s</button>
+      </div>
+      <div class="grid2" style="margin-top:8px;">
+        <button id="btnPrev" type="button">Previous</button>
+        <button id="btnNext" type="button">Next</button>
+      </div>
+      <div class="meta" style="margin-top:12px;">YouTube player <span id="ytVolState">needs extension</span></div>
+      <div class="volrow" style="margin-top:12px;">
+        <button id="btnVolDown" type="button" style="min-width:52px;">-</button>
+        <input id="volume" class="seek" type="range" min="0" max="100" value="50" />
+        <button id="btnVolUp" type="button" style="min-width:52px;">+</button>
+      </div>
+      <div class="meta" style="margin-top:6px;">Volume: <span id="volLabel">50</span>%</div>
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
+        <div class="meta">Windows system volume</div>
+        <div class="volrow" style="margin-top:12px;">
+          <button id="sysVolDown" type="button" style="min-width:52px;">-</button>
+          <input id="sysVolume" class="seek" type="range" min="0" max="100" value="50">
+          <button id="sysVolUp" type="button" style="min-width:52px;">+</button>
+        </div>
+        <div class="meta" style="margin-top:6px;">Volume: <span id="sysLabel">Reading…</span></div>
+      </div>
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
+        <div class="meta">Bass <span id="bassState">needs extension</span></div>
+        <div class="volrow" style="margin-top:12px;">
+          <button id="bassDown" type="button" style="min-width:52px;">-</button>
+          <input id="bass" class="seek" type="range" min="0" max="100" value="0" />
+          <button id="bassUp" type="button" style="min-width:52px;">+</button>
+        </div>
+        <div class="meta" style="margin-top:6px;">Cut: <span id="bassLabel">0</span> dB</div>
+      </div>
+    </div>
+
+    <div id="globalErr" class="err"></div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const TOKEN_KEY = 'ytRemoteAuthToken';
+const state = { status: null, seeking: false, bridgeConnected: false };
+
+function getToken() {
+  try {
+    const u = new URL(location.href);
+    const fromQuery = u.searchParams.get('token');
+    if (fromQuery) {
+      localStorage.setItem(TOKEN_KEY, fromQuery);
+      u.searchParams.delete('token');
+      history.replaceState({}, '', u.pathname + u.search + u.hash);
+      return fromQuery;
+    }
+    return localStorage.getItem(TOKEN_KEY) || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function authHeaders(extra = {}) {
+  const token = getToken();
+  const headers = { ...extra };
+  if (token) headers['X-YT-Remote-Token'] = token;
+  return headers;
+}
+
+function fmt(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+  return m + ':' + String(s).padStart(2,'0');
+}
+
+function setBridge(on, basic = false) {
+  state.bridgeConnected = !!on;
+  $('ytVolState').textContent = on ? '' : 'needs extension';
+  for (const id of ['volume','btnVolDown','btnVolUp','bass','bassDown','bassUp']) $(id).disabled = !on;
+  $('bassState').textContent = on ? '' : 'needs extension';
+  $('dot').className = 'dot ' + (on ? 'on' : 'off');
+  $('bridgeLabel').textContent = on ? 'Bridge connected' : (basic ? 'Basic mode (no extension)' : 'Connecting…');
+}
+
+function renderStatus(st) {
+  state.status = st;
+  if (!st) {
+    $('nowTitle').textContent = 'Nothing playing';
+    $('nowMeta').textContent = state.bridgeConnected ? 'Waiting for player status' : 'Open YouTube on the PC and load the extension';
+    return;
+  }
+  $('nowTitle').textContent = st.title || 'YouTube';
+  $('nowMeta').textContent = (st.channel ? st.channel + ' · ' : '') + (st.paused ? 'Paused' : 'Playing') + (st.muted ? ' · Muted' : '');
+  if (st.videoId) {
+    $('nowThumb').src = 'https://i.ytimg.com/vi/' + st.videoId + '/hqdefault.jpg';
+  }
+  const dur = Number(st.duration) || 0;
+  const cur = Number(st.currentTime) || 0;
+  $('tCur').textContent = fmt(cur);
+  $('tDur').textContent = fmt(dur);
+  if (!state.seeking && dur > 0) {
+    $('seek').value = Math.round((cur / dur) * 1000);
+  }
+  if (typeof st.volume === 'number') {
+    const v = Math.round(st.volume * 100);
+    $('volume').value = v;
+    $('volLabel').textContent = String(v);
+  }
+  $('btnPlay').textContent = st.paused ? 'Play' : 'Pause';
+  if (typeof st.bass === 'number') {
+    const pct = Math.round(st.bass * 100);
+    $('bass').value = pct;
+    const db = typeof st.bassDb === 'number' ? st.bassDb : (-30 * st.bass);
+    $('bassLabel').textContent = String(Math.round(db));
+  }
+  if (st.bassError) $('bassState').textContent = 'unavailable';
+  else if (state.bridgeConnected) $('bassState').textContent = '';
+}
+
+async function api(path, opts = {}) {
+  const headers = authHeaders(opts.headers || {});
+  const res = await fetch(path, { ...opts, headers });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    $('authBox').classList.add('show');
+    throw new Error(data.error || 'Unauthorized — enter access token');
+  }
+  if (!res.ok) throw new Error(data.error || res.statusText || 'Request failed');
+  return data;
+}
+
+async function command(action, extra = {}) {
+  $('globalErr').textContent = '';
+  try {
+    const data = await api('/api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ...extra }),
+    });
+    if (data.result && data.result.status) renderStatus(data.result.status);
+    return data;
+  } catch (e) {
+    $('globalErr').textContent = e.message || String(e);
+    throw e;
+  }
+}
+
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const token = getToken();
+  const q = token ? ('?role=ui&token=' + encodeURIComponent(token)) : '?role=ui';
+  const ws = new WebSocket(proto + '://' + location.host + '/' + q);
+  ws.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === 'hello' || msg.type === 'bridge') setBridge(msg.bridgeConnected);
+    if (msg.type === 'basic') setBridge(false, msg.basicMode);
+    if (msg.status) renderStatus(msg.status);
+    if (msg.type === 'status' && msg.status) renderStatus(msg.status);
+  };
+  ws.onclose = (ev) => {
+    setBridge(false);
+    if (ev && ev.code === 1008) $('authBox').classList.add('show');
+    setTimeout(connectWs, 1500);
+  };
+}
+
+$('authForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const token = $('authToken').value.trim();
+  if (!token) return;
+  localStorage.setItem(TOKEN_KEY, token);
+  $('authErr').textContent = '';
+  location.reload();
+});
+
+$('searchForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const q = $('q').value.trim();
+  if (!q) return;
+  $('searchErr').textContent = '';
+  $('results').innerHTML = '<div class="meta">Searching…</div>';
+  try {
+    const data = await api('/api/search?q=' + encodeURIComponent(q));
+    const list = data.results || [];
+    if (!list.length) {
+      $('results').innerHTML = '<div class="meta">No results</div>';
+      return;
+    }
+    $('results').innerHTML = '';
+    for (const r of list) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'result';
+      btn.innerHTML = '<img alt="" src="' + (r.thumbnail || '') + '" /><div><p class="t"></p><div class="c"></div></div>';
+      btn.querySelector('.t').textContent = r.title;
+      btn.querySelector('.c').textContent = r.channel || r.id;
+      btn.addEventListener('click', () => command('load', { videoId: r.id, url: r.url }));
+      $('results').appendChild(btn);
+    }
+  } catch (err) {
+    $('results').innerHTML = '';
+    $('searchErr').textContent = err.message || String(err);
+  }
+});
+
+$('btnRefresh').onclick = async () => {
+  $('btnRefresh').disabled = true;
+  async function attempt(action, timeout) {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), timeout);
+    try {
+      await fetch('/api/command', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ action }),
+        signal: abort.signal,
+      });
+    } catch (_) {}
+    finally { clearTimeout(timer); }
+  }
+  try {
+    await attempt('wakePC', 6000);
+    await attempt('showYouTube', 8000);
+  } finally {
+    const u = new URL(location.href); u.searchParams.set('_refresh', Date.now()); location.replace(u.href);
+  }
+};
+$('btnPlay').onclick = () => command('togglePlay');
+$('btnBack').onclick = () => command('seekBy', { seconds: -10 });
+$('btnFwd').onclick = () => command('seekBy', { seconds: 10 });
+$('btnPrev').onclick = () => command('prev');
+$('btnNext').onclick = () => command('next');
+$('btnVolDown').onclick = () => command('volumeBy', { delta: -0.05 });
+$('btnVolUp').onclick = () => command('volumeBy', { delta: 0.05 });
+
+$('volume').addEventListener('input', () => { $('volLabel').textContent = $('volume').value; });
+$('volume').addEventListener('change', () => {
+  command('setVolume', { volume: Number($('volume').value) / 100 });
+});
+$('bass').addEventListener('input', () => {
+  const db = -30 * (Number($('bass').value) / 100);
+  $('bassLabel').textContent = String(Math.round(db));
+});
+$('bass').addEventListener('change', () => {
+  command('setBass', { amount: Number($('bass').value) / 100 });
+});
+$('bassDown').onclick = () => command('bassBy', { delta: -0.05 });
+$('bassUp').onclick = () => command('bassBy', { delta: 0.05 });
+
+$('seek').addEventListener('pointerdown', () => { state.seeking = true; });
+$('seek').addEventListener('pointerup', () => {
+  const st = state.status;
+  const dur = st && Number(st.duration) || 0;
+  const frac = Number($('seek').value) / 1000;
+  state.seeking = false;
+  if (dur > 0) command('seekTo', { seconds: dur * frac });
+});
+
+async function refresh() {
+  try {
+    const data = await api('/api/status');
+    setBridge(data.bridgeConnected, data.basicMode);
+    if (data.status) renderStatus(data.status);
+  } catch (_) {}
+}
+
+async function systemVolume(body) {
+  try {
+    const r = await api('/api/system-volume', body ? {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    } : undefined);
+    $('sysVolume').value = Math.round(r.volume * 100);
+    $('sysLabel').textContent = Math.round(r.volume * 100) + '%';
+  } catch (e) {
+    $('sysLabel').textContent = e.message;
+  }
+}
+$('sysVolume').onchange = () => systemVolume({ volume: Number($('sysVolume').value) / 100 });
+$('sysVolDown').onclick = () => systemVolume({ volume: Math.max(0, Number($('sysVolume').value) / 100 - 0.05) });
+$('sysVolUp').onclick = () => systemVolume({ volume: Math.min(1, Number($('sysVolume').value) / 100 + 0.05) });
+systemVolume();
+setInterval(() => systemVolume(), 10000);
+connectWs();
+refresh();
+setInterval(refresh, 4000);
+
+// Show auth box when health reports auth is required and we have no token yet.
+api('/api/health').then((h) => {
+  if (h.authRequired && !getToken()) $('authBox').classList.add('show');
+}).catch(() => {});
+</script>
+</body>
+</html>

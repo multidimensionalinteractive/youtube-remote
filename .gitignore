@@ -1,0 +1,48 @@
+# Local operator config and secrets
+.env
+.env.*
+!.env.example
+config.local.json
+*.local.json
+
+# Dependencies and runtime data
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Local Chrome / CDP working profiles (may contain cookies & account data)
+chrome-profile/
+cdp-profile*/
+cdp-profile-*/
+
+# Logs, caches, crash dumps, OS junk
+*.log
+logs/
+.cache/
+*.tmp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Screenshots that may contain personal UI
+*-screen.png
+*-screenshot.png
+screenshots/
+
+# Local scratch / debug helpers (never publish)
+inspect-*.js
+read-chrome-profiles.js
+scripts/test-*.ps1
+scripts/*-debug*.ps1
+scripts/final-verify.ps1
+scripts/close-extra-youtube.ps1
+scripts/extension-in-playing-window.ps1
+scripts/inspect-chrome.ps1
+scripts/install-extension-ui.ps1
+scripts/yt-debug-chrome.ps1

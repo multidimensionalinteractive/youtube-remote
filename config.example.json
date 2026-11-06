@@ -1,0 +1,12 @@
+{
+  "host": "127.0.0.1",
+  "port": 8790,
+  "allowLan": false,
+  "authToken": "",
+  "allowedHosts": [],
+  "chromePath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "chromeProfileDirectory": "Default",
+  "chromeUserDataDir": "",
+  "cdpPort": 9333,
+  "cdpProfileDir": ""
+}

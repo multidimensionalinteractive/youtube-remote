@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Remote Bridge",
+  "version": "1.0.0",
+  "description": "Bridges the local YouTube Remote control page to the active YouTube tab.",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "*://www.youtube.com/*",
+    "*://youtube.com/*",
+    "*://m.youtube.com/*",
+    "http://127.0.0.1:8790/*",
+    "http://localhost:8790/*",
+    "ws://127.0.0.1:8790/*",
+    "ws://localhost:8790/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://www.youtube.com/*",
+        "*://youtube.com/*",
+        "*://m.youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "YouTube Remote Bridge"
+  }
+}
