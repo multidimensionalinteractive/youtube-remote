@@ -19,6 +19,7 @@ const MUTATING_ACTIONS = new Set([
   'togglePlay', 'play', 'pause', 'prev', 'next',
   'volumeBy', 'setVolume', 'toggleMute', 'mute', 'unmute',
   'seekBy', 'seekTo', 'setBass', 'bassBy', 'reloadExtension', 'cleanupYouTube',
+  'screensOff', 'setStopAfter', 'toggleStopAfter',
 ]);
 
 const state = {
@@ -178,6 +179,33 @@ function runPowershellFile(scriptPath, extraPrefix = '') {
   return runPowershell(text);
 }
 
+// Runs an allowlisted script with powershell -File (not -Command) so it executes
+// as a real script file in the server's interactive desktop session. Needed for
+// window messages such as SC_MONITORPOWER that must reach the logged-in desktop.
+function runPowershellScriptFile(scriptPath) {
+  const abs = path.resolve(scriptPath);
+  const scriptsRoot = path.resolve(path.join(config.root, 'scripts')) + path.sep;
+  if (!abs.toLowerCase().startsWith(scriptsRoot.toLowerCase())) {
+    return Promise.reject(new Error('Script path not allowed'));
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', abs],
+      { windowsHide: true, cwd: path.dirname(abs) }
+    );
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (c) => { out += c.toString(); });
+    child.stderr.on('data', (c) => { err += c.toString(); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) reject(new Error(err.trim() || out.trim() || ('powershell file exited ' + code)));
+      else resolve(out.trim());
+    });
+  });
+}
+
 async function refreshBasicStatus() {
   if (basicPolling || state.bridgeConnected) return;
   basicPolling = true;
@@ -322,11 +350,20 @@ Start-Sleep -Milliseconds 100
   return { ok: true, mode: 'interactive-mouse', message: 'Mouse moved and restored' };
 }
 
+// Turns the monitors off without sleeping or locking the PC. Playback keeps going.
+// Only an explicit wakePC (or local mouse/keyboard input) turns them back on;
+// status polling never does.
+async function screensOff() {
+  const out = await runPowershellScriptFile(path.join(config.root, 'scripts', 'screens-off.ps1'));
+  return { ok: true, mode: 'monitor-power', message: String(out || '').trim().split(/\r?\n/).pop() || 'MONITORS_OFF_DONE' };
+}
+
 async function callBridgeOrNative(action, payload = {}, timeoutMs = 8000) {
   if (!MUTATING_ACTIONS.has(action) && action !== 'status') {
     throw new Error('Unsupported action');
   }
   if (action === 'wakePC') return wakePC();
+  if (action === 'screensOff') return screensOff();
 
   if (bridgeSocket && bridgeSocket.readyState === 1) {
     return callBridge(action, payload, timeoutMs);
@@ -500,7 +537,7 @@ async function handleApi(req, res, pathname) {
       let script = fs.readFileSync(path.join(config.root, 'scripts', 'system-volume.ps1'), 'utf8');
       const level = typeof body.volume === 'number' ? Math.max(0, Math.min(1, body.volume)) : -1;
       const mute = typeof body.muted === 'boolean' ? String(body.muted) : '';
-      // Inject only numeric/boolean values — never raw user strings into PowerShell.
+      // Inject only numeric/boolean values, never raw user strings into PowerShell.
       script = script.replace(
         "param([double]$Level=-1,[string]$Mute='')",
         '$Level=' + level + ";$Mute='" + mute.replace(/[^a-z]/gi, '') + "'"

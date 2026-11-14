@@ -82,7 +82,7 @@ describe('extension content script bass wiring', () => {
 
   it('does not pull remote CDNs or broaden host permissions', () => {
     assert.doesNotMatch(content, /cdn\.|unpkg|jsdelivr|googleapis/i);
-    assert.deepEqual(manifest.permissions, ['tabs']);
+    assert.deepEqual(manifest.permissions, ['tabs', 'storage']);
     for (const p of manifest.host_permissions) {
       assert.ok(
         /youtube\.com|127\.0\.0\.1:8790|localhost:8790/.test(p),

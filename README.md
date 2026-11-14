@@ -15,6 +15,8 @@ Your phone (or another device) opens a simple mobile UI served by a small Node.j
 - **Now playing** title/channel/thumbnail + seek bar (best with extension)
 - **YouTube loudness** (− / slider / +) via persistent Web Audio **GainNode** when the bridge is attached (separate from **Windows system volume**); remote UI ignores status volume while you are dragging the slider
 - **Bass cut** slider (− / +) via lowshelf filter (neutral default; independent of GainNode loudness / system volume)
+- **Screens off** button: turns the PC monitors off while the video keeps playing (no sleep, no lock); tap the status pill to wake them
+- **Stop after this video** toggle: when On (green), playback pauses at the end of the current video instead of autoplaying the next one; when Off, YouTube keeps playing as normal
 - Fallback **basic mode** when the extension is offline (tab title via UI Automation + media keys)
 - **LAN hardening**: loopback default bind, optional shared `authToken`, CSRF Origin/Host checks, Private-profile firewall helper, minimal unauthenticated `/api/health`
 
@@ -41,8 +43,8 @@ The bridge content script inserts a **Web Audio** graph on the managed YouTube `
 
 | Control | Behavior |
 |---|---|
-| Slider amount `0` | Neutral — filter gain **0 dB** (default) |
-| Slider amount `1` | Maximum cut — **−30 dB** lowshelf (configurable in `extension/content.js` → `BASS_CONFIG.maxCutDb`) |
+| Slider amount `0` | Neutral: filter gain **0 dB** (default) |
+| Slider amount `1` | Maximum cut: **−30 dB** lowshelf (configurable in `extension/content.js` → `BASS_CONFIG.maxCutDb`) |
 | Corner frequency | **200 Hz** by default (intended band ~150–250 Hz) |
 | − / + buttons | Step amount by `0.05` (`bassBy`) |
 
@@ -66,9 +68,29 @@ The bridge content script inserts a **Web Audio** graph on the managed YouTube `
 - Bass amount persists for the tab via `sessionStorage`
 - On `pagehide`, the context is suspended (not torn down) to avoid breaking ongoing playback plumbing
 
-Tune `BASS_CONFIG` in `extension/content.js` (mirror defaults live in `lib/bass.js` for tests). No remote CDN or extra extension permissions are required for bass — only the existing YouTube + local bridge host permissions, plus `tabs` for focus/cleanup helpers.
+Tune `BASS_CONFIG` in `extension/content.js` (mirror defaults live in `lib/bass.js` for tests). No remote CDN or extra extension permissions are required for bass. The extension uses only the YouTube + local bridge host permissions, `tabs` for focus/cleanup helpers, and `storage` to remember the Stop after this video setting.
 
 Reload the unpacked extension after changing `BASS_CONFIG` or `content.js`.
+
+## Screens off
+
+Tap **Screens off** to turn the monitors off while audio and video keep playing. Handy for music, podcasts, or falling asleep to a video without a bright screen.
+
+- The server runs the fixed helper `scripts/screens-off.ps1` with `powershell -File` (allowlisted action `screensOff`). It must run in your normal logged-in desktop session, which is the case for `npm start`, the Startup-folder shortcut, and the per-user scheduled task.
+- The script sends the Windows `SC_MONITORPOWER` "off" message (via both `PostMessage` and `SendMessage`) to the broadcast window and the taskbar, then repeats it for about 4 seconds, because a playing video often asks Windows to turn the display back on right away.
+- It does **not** sleep, hibernate, or lock the PC, and it writes no log files.
+- To turn the screens back on, tap the **status pill** (which runs `wakePC`, a tiny mouse nudge), or move the mouse / press a key at the PC. Background status polling never wakes the screens.
+- Some monitors or GPU drivers ignore `SC_MONITORPOWER` or wake on any input event. If the screens come back on by themselves, check for a device (mouse, controller, webcam app) that is sending input.
+
+## Stop after this video
+
+Tap **Stop after this video** to switch it between **Off** and **On**. The button turns green while it is On.
+
+- **On:** about 1 second before the current video ends, the extension pauses it, cancels the autoplay / "Up next" countdown, and turns the player's autoplay toggle off, so YouTube does not move on to the next video or the next playlist item. Ads are ignored, so it only stops at the end of the real video.
+- **Off:** YouTube behaves normally and keeps playing whatever comes next.
+- The setting stays On until you turn it Off. It is saved in the extension's `chrome.storage.local` (survives tab reloads and browser restarts) and mirrored in the tab's `sessionStorage` so it applies instantly as YouTube swaps pages.
+- Status responses include `stopAfter: true|false`, so every phone showing the remote stays in sync.
+- Requires the Chrome extension bridge (actions `toggleStopAfter` and `setStopAfter` with `{ "enabled": true|false }`). It uses the `storage` extension permission; reload the unpacked extension after updating.
 
 ## Requirements
 
@@ -159,13 +181,13 @@ If you already run a machine-specific install that binds `0.0.0.0:8790` without 
 
 ## Security
 
-**Trust model:** this is a **local convenience remote**, not an internet service. Anyone who can reach the HTTP API on your LAN can attempt to control media, nudge the mouse (wake), change system volume, and see now-playing metadata.
+**Trust model:** this is a **local convenience remote**, not an internet service. Anyone who can reach the HTTP API on your LAN can attempt to control media, nudge the mouse (wake), turn the monitors off, change system volume, and see now-playing metadata.
 
 ### Do
 
 - Keep the default **loopback bind** unless you need phone access
 - Set a strong **`authToken`** whenever LAN listening is enabled
-- Use the provided firewall script (**Private** profile only) — do **not** open the port on Public/Domain profiles casually
+- Use the provided firewall script (**Private** profile only); do **not** open the port on Public/Domain profiles casually
 - Keep Chrome extension host permissions limited to YouTube + local server endpoints
 - Treat `config.local.json`, `.env`, `chrome-profile/`, and any CDP profiles as **private** (gitignored)
 
@@ -174,7 +196,7 @@ If you already run a machine-specific install that binds `0.0.0.0:8790` without 
 - **Port-forward / expose TCP 8790 (or your chosen port) to the public internet**
 - Run this on hostile or guest networks without understanding the risk
 - Commit tokens, cookies, browser profiles, logs, or personal paths
-- Expect CSRF/token checks to replace a proper reverse-proxy auth stack — they are LAN hardening, not a public threat model
+- Expect CSRF/token checks to replace a proper reverse-proxy auth stack; they are LAN hardening, not a public threat model
 
 ### Hardening included in this package
 
@@ -184,7 +206,7 @@ If you already run a machine-specific install that binds `0.0.0.0:8790` without 
 - Action allowlist (no arbitrary command/shell endpoint)
 - YouTube HTTPS URL validation before navigation helpers
 - Bridge websocket accepted from loopback only
-- Extension permissions scoped to YouTube + local app endpoints (`tabs` only + host allowlist)
+- Extension permissions scoped to YouTube + local app endpoints (`tabs` and `storage` only + host allowlist)
 - Fixed PowerShell scripts only (path-checked under `scripts/`)
 - Baseline security headers (`X-Content-Type-Options`, `X-Frame-Options`, CSP); no `Access-Control-Allow-Origin: *`
 - Unauthenticated `/api/health` omits now-playing `lastStatus` (loopback or token required for that detail)
@@ -200,6 +222,9 @@ If you already run a machine-specific install that binds `0.0.0.0:8790` without 
 | Next does nothing without extension | Native fallback needs a focusable YouTube Chrome window |
 | 401 Unauthorized | Enter the configured `authToken` in the UI auth box |
 | CSRF 403 | Open the UI via the same host you configured; add host to `allowedHosts` if using a hostname/Tailscale name |
+| Screens off does nothing | Make sure the server runs in your logged-in desktop session (not as a service or another user); some monitors ignore the power-off message |
+| Screens turn back on right away | Something is sending input (mouse, controller, an app); tap Screens off again after it settles |
+| Stop after this video does not stop | Reload the unpacked extension (it needs the `storage` permission) and refresh the YouTube tab; the bridge must be connected |
 | Autostart didn’t run | Check Startup folder shortcut / Task Scheduler task `YouTubeRemoteServer` |
 
 ### Windows permissions / accessibility
@@ -217,10 +242,10 @@ npm test
 node --check server.js
 ```
 
-`npm test` covers bass math (including the live-verified `0.4 → −12 dB` mapping), persistent GainNode loudness / media-swap volume behavior, content-script wiring assertions, and UI control presence — **without** launching Chrome or touching a real browser profile.
+`npm test` covers bass math (including the live-verified `0.4 → −12 dB` mapping), persistent GainNode loudness / media-swap volume behavior, content-script wiring assertions, and UI control presence (including Screens off and Stop after this video wiring), **without** launching Chrome or touching a real browser profile.
 
 End-to-end playback (extension bridge on a signed-in YouTube/Premium tab, UIA focus, system volume, phone-on-LAN) depends on a Windows desktop with Chrome. This packaging pass does **not** attach to or modify an operator’s everyday Chrome profile. Treat LAN exposure carefully and verify on your own network before relying on it.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).

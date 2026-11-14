@@ -8,9 +8,26 @@
   let reconnectTimer = null;
   let statusTimer = null;
 
-  // Desired loudness (0–1). While the Web Audio graph is active, GainNode is the authority —
+  // Desired loudness (0–1). While the Web Audio graph is active, GainNode is the authority;
   // element/player volume reads after createMediaElementSource are not trustworthy.
   let lastKnownVolume = 0.75;
+
+  // "Stop after this video": when on, pause about 1s before the end and cancel
+  // autoplay / up next so YouTube never advances. Persisted in chrome.storage.local
+  // (survives reloads) and mirrored in sessionStorage for instant reads on SPA navigation.
+  let stopAfter = false;
+  try {
+    if (sessionStorage.getItem('ytRemoteStopAfter') === '1') stopAfter = true;
+  } catch (_) {}
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.get(['stopAfterThisVideo'], (r) => {
+        stopAfter = !!(r && r.stopAfterThisVideo);
+        try { sessionStorage.setItem('ytRemoteStopAfter', stopAfter ? '1' : '0'); } catch (_) {}
+        wireStopAfterHandlers();
+      });
+    }
+  } catch (_) {}
 
   function videoEl() {
     return document.querySelector('video');
@@ -40,6 +57,166 @@
   function getChannel() {
     const a = document.querySelector('#channel-name a, ytd-channel-name a, #owner #text a');
     return a && a.textContent ? a.textContent.trim() : '';
+  }
+
+  function isAdPlaying() {
+    try {
+      if (document.querySelector('.ad-showing, .ytp-ad-player-overlay, .ytp-ad-module')) return true;
+    } catch (_) {}
+    try {
+      const p = player();
+      if (p && typeof p.getAdState === 'function' && p.getAdState() === 1) return true;
+    } catch (_) {}
+    return false;
+  }
+
+  let stopAfterGuardUntil = 0;
+  let stopAfterPinnedId = null;
+  let stopAfterTimer = null;
+
+  function disableAutoplayUi() {
+    try {
+      const toggles = document.querySelectorAll(
+        '.ytp-autonav-toggle-button[aria-checked="true"],' +
+        '.ytp-autonav-toggle-button[aria-pressed="true"],' +
+        'button[aria-label*="Autoplay" i][aria-pressed="true"],' +
+        'button[aria-label*="Autoplay" i][aria-checked="true"]'
+      );
+      toggles.forEach((b) => { try { b.click(); } catch (_) {} });
+    } catch (_) {}
+    try {
+      const p = player();
+      if (p && typeof p.setOption === 'function') {
+        try { p.setOption('autonav', 'disabled'); } catch (_) {}
+        try { p.setOption('autonav', false); } catch (_) {}
+      }
+      if (p && typeof p.setAutonav === 'function') {
+        try { p.setAutonav(false); } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  function cancelUpNext() {
+    disableAutoplayUi();
+    const sels = [
+      '.ytp-autonav-endscreen-upnext-cancel-button',
+      '.ytp-upnext-cancel-button',
+      '.ytp-endscreen-content button[aria-label*="Cancel" i]',
+      'button.ytp-upnext-cancel-button',
+      'button[aria-label="Cancel"]',
+      'button[aria-label*="Cancel autoplay" i]',
+    ];
+    for (const sel of sels) {
+      document.querySelectorAll(sel).forEach((b) => { try { b.click(); } catch (_) {} });
+    }
+  }
+
+  function pauseHard() {
+    const v = videoEl();
+    try { if (v) v.pause(); } catch (_) {}
+    try {
+      const p = player();
+      if (p && typeof p.pauseVideo === 'function') p.pauseVideo();
+    } catch (_) {}
+  }
+
+  function holdNearEnd(v) {
+    if (!v || !isFinite(v.duration) || v.duration < 2) return;
+    try {
+      const target = Math.max(0, v.duration - 0.35);
+      if (v.currentTime > target) v.currentTime = target;
+    } catch (_) {}
+  }
+
+  function enforceStopAtEnd() {
+    if (!stopAfter) return;
+    if (isAdPlaying()) return;
+    const v = videoEl();
+    if (!v || !isFinite(v.duration) || v.duration < 2) return;
+    const remaining = v.duration - v.currentTime;
+    // Pause early so YouTube never reaches ENDED / autoplay handoff.
+    if (remaining > 1.0) return;
+    stopAfterGuardUntil = Date.now() + 8000;
+    stopAfterPinnedId = getVideoId() || stopAfterPinnedId;
+    pauseHard();
+    holdNearEnd(v);
+    cancelUpNext();
+  }
+
+  function onVideoEnded(ev) {
+    if (!stopAfter) return;
+    if (isAdPlaying()) return;
+    const v = ev && ev.target ? ev.target : videoEl();
+    stopAfterGuardUntil = Date.now() + 8000;
+    stopAfterPinnedId = getVideoId() || stopAfterPinnedId;
+    pauseHard();
+    holdNearEnd(v);
+    cancelUpNext();
+    setTimeout(cancelUpNext, 150);
+    setTimeout(cancelUpNext, 500);
+    setTimeout(cancelUpNext, 1200);
+    setTimeout(() => { pauseHard(); holdNearEnd(videoEl()); }, 200);
+  }
+
+  function onStopAfterPlay(ev) {
+    if (!stopAfter) return;
+    if (Date.now() > stopAfterGuardUntil) return;
+    const t = ev && ev.target;
+    if (!t || (t.tagName !== 'VIDEO' && t.tagName !== 'AUDIO')) return;
+    // After we freeze near end, block YouTube restarting / advancing via play.
+    if (isFinite(t.duration) && t.duration > 2 && (t.duration - t.currentTime) <= 1.5) {
+      try { ev.preventDefault(); } catch (_) {}
+      pauseHard();
+      holdNearEnd(t);
+      cancelUpNext();
+    }
+  }
+
+  function wireStopAfterHandlers() {
+    try {
+      document.querySelectorAll('video').forEach((v) => {
+        if (v.__ytRemoteStopWired) return;
+        v.__ytRemoteStopWired = true;
+        v.addEventListener('timeupdate', enforceStopAtEnd);
+        v.addEventListener('ended', onVideoEnded);
+        v.addEventListener('seeking', enforceStopAtEnd);
+        v.addEventListener('seeked', enforceStopAtEnd);
+        v.addEventListener('ratechange', enforceStopAtEnd);
+      });
+    } catch (_) {}
+    if (!window.__ytRemoteStopPlayHook) {
+      window.__ytRemoteStopPlayHook = true;
+      document.addEventListener('play', onStopAfterPlay, true);
+    }
+    if (!stopAfterTimer) {
+      stopAfterTimer = setInterval(() => {
+        try {
+          if (!stopAfter) return;
+          enforceStopAtEnd();
+          if (Date.now() < stopAfterGuardUntil) cancelUpNext();
+        } catch (_) {}
+      }, 200);
+    }
+  }
+
+  function setStopAfter(on) {
+    stopAfter = !!on;
+    try { sessionStorage.setItem('ytRemoteStopAfter', stopAfter ? '1' : '0'); } catch (_) {}
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({ stopAfterThisVideo: stopAfter });
+      }
+    } catch (_) {}
+    wireStopAfterHandlers();
+    if (stopAfter) {
+      stopAfterPinnedId = getVideoId();
+      disableAutoplayUi();
+      enforceStopAtEnd();
+    } else {
+      stopAfterGuardUntil = 0;
+      stopAfterPinnedId = null;
+    }
+    return stopAfter;
   }
 
   function getStatus() {
@@ -76,7 +253,7 @@
     }
     ensureBassGraph();
     if (bassState.gain) {
-      // Read the actual GainNode — do not lie with a cached lastKnownVolume while graph is live.
+      // Read the actual GainNode; do not lie with a cached lastKnownVolume while graph is live.
       volume = clamp01(bassState.gain.gain.value);
       lastKnownVolume = volume;
     } else if (p && typeof p.getVolume === 'function') {
@@ -107,6 +284,7 @@
       bassError: bassState.error,
       bassAttached: !!(bassState.source && bassState.attachedVideo),
       gain: bassState.gain ? bassState.gain.gain.value : null,
+      stopAfter: !!stopAfter,
     };
   }
 
@@ -133,7 +311,7 @@
     source: null,
     attachedVideo: null,
     error: null,
-    // Persist MediaElementSource nodes per <video> — createMediaElementSource may only be called once per element.
+    // Persist MediaElementSource nodes per <video>; createMediaElementSource may only be called once per element.
     sources: (window.__ytRemoteBassSources = window.__ytRemoteBassSources || new WeakMap()),
   };
   try {
@@ -245,11 +423,13 @@
         clampAllVideoVolumes();
         ensureBassGraph();
         resumeBassContext();
+        wireStopAfterHandlers();
+        if (stopAfter) enforceStopAtEnd();
       }
     } catch (_) {}
   }, true);
   try {
-    const mo = new MutationObserver(() => { try { clampAllVideoVolumes(); ensureBassGraph(); } catch (_) {} });
+    const mo = new MutationObserver(() => { try { clampAllVideoVolumes(); ensureBassGraph(); wireStopAfterHandlers(); } catch (_) {} });
     mo.observe(document.documentElement, { childList: true, subtree: true });
   } catch (_) {}
 
@@ -338,6 +518,14 @@
       }
       case 'setBass': {
         await setBass(msg.amount);
+        return getStatus();
+      }
+      case 'setStopAfter': {
+        setStopAfter(!!msg.enabled || !!msg.on || !!msg.value);
+        return getStatus();
+      }
+      case 'toggleStopAfter': {
+        setStopAfter(!stopAfter);
         return getStatus();
       }
       case 'bassBy': {
@@ -480,5 +668,6 @@
     });
   }
 
+  wireStopAfterHandlers();
   connect();
 })();

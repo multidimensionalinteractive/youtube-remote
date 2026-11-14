@@ -62,6 +62,7 @@
   .volrow { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; }
   .authbox { display: none; }
   .authbox.show { display: block; }
+  button.toggle-on { background: linear-gradient(135deg, #1f8f4e, #30d158); color: #04140a; }
 </style>
 </head>
 <body>
@@ -117,6 +118,8 @@
         <button id="btnPrev" type="button">Previous</button>
         <button id="btnNext" type="button">Next</button>
       </div>
+      <button id="btnScreensOff" type="button" style="width:100%;margin-top:8px;">Screens off</button>
+      <button id="btnStopAfter" type="button" style="width:100%;margin-top:8px;">Stop after this video: Off</button>
       <div class="meta" style="margin-top:12px;">YouTube player <span id="ytVolState">needs extension</span></div>
       <div class="volrow" style="margin-top:12px;">
         <button id="btnVolDown" type="button" style="min-width:52px;">-</button>
@@ -246,6 +249,14 @@ function renderStatus(st) {
   }
   if (st.bassError) $('bassState').textContent = 'unavailable';
   else if (state.bridgeConnected) $('bassState').textContent = '';
+  if (typeof st.stopAfter === 'boolean') renderStopAfter(st.stopAfter);
+}
+
+function renderStopAfter(on) {
+  const btn = $('btnStopAfter');
+  if (!btn) return;
+  btn.textContent = on ? 'Stop after this video: On' : 'Stop after this video: Off';
+  btn.classList.toggle('toggle-on', !!on);
 }
 
 async function api(path, opts = {}) {
@@ -254,7 +265,7 @@ async function api(path, opts = {}) {
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) {
     $('authBox').classList.add('show');
-    throw new Error(data.error || 'Unauthorized — enter access token');
+    throw new Error(data.error || 'Unauthorized: enter access token');
   }
   if (!res.ok) throw new Error(data.error || res.statusText || 'Request failed');
   return data;
@@ -361,6 +372,8 @@ $('btnBack').onclick = () => command('seekBy', { seconds: -10 });
 $('btnFwd').onclick = () => command('seekBy', { seconds: 10 });
 $('btnPrev').onclick = () => command('prev');
 $('btnNext').onclick = () => command('next');
+$('btnScreensOff').onclick = () => command('screensOff');
+$('btnStopAfter').onclick = () => command('toggleStopAfter');
 $('btnVolDown').onclick = () => command('volumeBy', { delta: -0.05 });
 $('btnVolUp').onclick = () => command('volumeBy', { delta: 0.05 });
 
