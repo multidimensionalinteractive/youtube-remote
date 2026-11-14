@@ -1,14 +1,15 @@
 # YouTube Remote
 
-A **local** phone/web remote for YouTube playing in **Google Chrome on Windows**.
+A **local** phone/web remote for YouTube playing in **Google Chrome on Windows**. Works on **iPhone and Android** (and any other browser on your network) and can be added to the home screen like an app.
 
-Your phone (or another device) opens a simple mobile UI served by a small Node.js server on the PC. A Chrome unpacked extension bridges precise player control (seek, volume, now playing, bass cut). Without the extension, basic Windows media keys and UI Automation still cover play/pause, next/previous, and coarse volume.
+Your iPhone or Android phone (or another device) opens a simple mobile UI served by a small Node.js server on the PC. A Chrome unpacked extension bridges precise player control (seek, volume, now playing, bass cut). Without the extension, basic Windows media keys and UI Automation still cover play/pause, next/previous, and coarse volume.
 
 > This repository is a sanitized, reusable packaging of a working Windows setup. Defaults are **loopback-only** and generic. Enabling LAN listening is an explicit operator choice and should stay on a private/trusted network with an auth token.
 
 ## Features
 
-- **Mobile UI** at `http://<host>:8790/` (port configurable)
+- **Mobile UI** at `http://<host>:8790/` (port configurable) for iPhone and Android
+- **Home screen app**: web app manifest, Android and iOS icons (including maskable), standalone full-screen mode, safe-area aware layout
 - **Status pill** (tap): wake PC (small mouse nudge) + show/focus YouTube tab + refresh the remote page
 - **Search** via `yt-dlp` (`ytsearch`); choosing a result loads the video in the existing YouTube tab and closes duplicate YouTube tabs when the extension bridge is connected
 - **Playback**: play/pause, −10s / +10s seek, previous, next
@@ -175,6 +176,36 @@ npm run open-firewall
 3. Ensure the Windows network profile is **Private** (Public Wi‑Fi profiles often block inbound LAN).
 4. On the phone, open `http://<pc-lan-ip>:8790/` and paste the same token when prompted (or open `http://<pc-lan-ip>:8790/?token=...` once; the UI stores it in `localStorage`).
 
+### Add it to your phone's home screen
+
+**iPhone (Safari):** open the remote, tap **Share**, then **Add to Home Screen**.
+
+**Android (Chrome):** open the remote, tap the **⋮** menu, then **Add to Home screen** (on some versions: **Install app**), then **Add**. The icon opens the remote full screen without the browser bar. Samsung Internet and Firefox for Android have the same option in their menus.
+
+Good to know on Android:
+
+- Over plain `http://<pc-lan-ip>:8790/`, Chrome treats the page as "not secure", so it will not show its automatic install banner. **Add to Home screen** from the menu still works and creates a shortcut that opens the remote in its own window with the app icon. On newer Chrome versions the shortcut may open inside a Chrome tab instead of full screen; that is normal for HTTP pages and every control still works.
+- For a full installed app (install banner, app drawer entry, true standalone window), the page must be served over **HTTPS** (or from `localhost`). One easy option is Tailscale, below.
+- The access token you paste once is saved in the browser for that address, so the home screen icon opens straight into the remote. If you later use a different address (for example the HTTPS one), paste the token once there too.
+- Sliders, buttons, and search are touch-first: no hover-only controls, no double-tap zoom delay, and slider drags that Android cancels are handled cleanly.
+
+### Optional: HTTPS with Tailscale (full Android install)
+
+If you use [Tailscale](https://tailscale.com/) on the PC and the phone, Tailscale can put a trusted HTTPS address in front of the remote without opening any ports:
+
+1. In the Tailscale admin console, turn on **MagicDNS** and **HTTPS certificates**.
+2. Set a strong `authToken` in `config.local.json` first. Requests relayed by `tailscale serve` arrive from the PC itself, and this server detects that and requires the token for them anyway; without a token they are refused.
+3. On the PC, run:
+
+```bat
+tailscale serve --bg 8790
+```
+
+4. On the phone (with Tailscale connected), open the `https://<your-pc-name>.<your-tailnet>.ts.net/` address that `tailscale serve status` prints, paste the token, then use Chrome's **Install app** prompt or **⋮ > Install app**.
+5. If you see a CSRF 403, add that `.ts.net` host to `allowedHosts`.
+
+The server can stay on its default loopback-only bind with this setup, because Tailscale connects to it locally. Only devices signed in to your tailnet can reach the address. Use `tailscale serve` (private to your tailnet), **not** `tailscale funnel` (public internet). Run `tailscale serve --https=443 off` to turn it off again.
+
 ### Compatibility note for an existing deployment
 
 If you already run a machine-specific install that binds `0.0.0.0:8790` without a token, this public package is stricter by default. To keep phone-on-LAN behavior, set `allowLan` + `authToken` (and firewall) as above. Core API shapes remain: `/api/health`, `/api/status`, `/api/search`, `/api/command`, `/api/system-volume`, plus UI/bridge websockets.
@@ -206,6 +237,7 @@ If you already run a machine-specific install that binds `0.0.0.0:8790` without 
 - Action allowlist (no arbitrary command/shell endpoint)
 - YouTube HTTPS URL validation before navigation helpers
 - Bridge websocket accepted from loopback only
+- Requests relayed by a local reverse proxy (for example `tailscale serve`) do not get loopback trust; they need the token and cannot act as the bridge
 - Extension permissions scoped to YouTube + local app endpoints (`tabs` and `storage` only + host allowlist)
 - Fixed PowerShell scripts only (path-checked under `scripts/`)
 - Baseline security headers (`X-Content-Type-Options`, `X-Frame-Options`, CSP); no `Access-Control-Allow-Origin: *`
@@ -225,6 +257,8 @@ If you already run a machine-specific install that binds `0.0.0.0:8790` without 
 | Screens off does nothing | Make sure the server runs in your logged-in desktop session (not as a service or another user); some monitors ignore the power-off message |
 | Screens turn back on right away | Something is sending input (mouse, controller, an app); tap Screens off again after it settles |
 | Stop after this video does not stop | Reload the unpacked extension (it needs the `storage` permission) and refresh the YouTube tab; the bridge must be connected |
+| Android: no "Install app" option | Expected over plain HTTP. Use **⋮ > Add to Home screen**, or use the Tailscale HTTPS setup for a full install |
+| Android: home screen icon asks for the token again | The token is saved per address; paste it once at the address the icon opens |
 | Autostart didn’t run | Check Startup folder shortcut / Task Scheduler task `YouTubeRemoteServer` |
 
 ### Windows permissions / accessibility

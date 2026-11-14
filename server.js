@@ -67,6 +67,19 @@ function isLoopbackAddress(addr) {
   return a === '127.0.0.1' || a === '::1' || a === 'localhost';
 }
 
+// A request only counts as "local" when it comes from loopback AND was not relayed
+// by a reverse proxy on the same PC (for example `tailscale serve` for HTTPS).
+// Proxied requests arrive from 127.0.0.1, so without this check every proxied
+// client would get loopback trust (no token, bridge access).
+const PROXY_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'forwarded', 'x-real-ip', 'tailscale-user-login', 'tailscale-user-name', 'tailscale-headers-info'];
+function isProxied(req) {
+  const h = (req && req.headers) || {};
+  return PROXY_HEADERS.some((k) => h[k] != null && String(h[k]).length > 0);
+}
+function isLocalRequest(req) {
+  return isLoopbackAddress(req && req.socket && req.socket.remoteAddress) && !isProxied(req);
+}
+
 function parseHostHeader(hostHeader) {
   if (!hostHeader) return '';
   return String(hostHeader).trim().toLowerCase();
@@ -90,7 +103,7 @@ function csrfOk(req) {
 
   if (!origin && !referer) {
     // Allow token-authenticated or loopback clients without Origin (curl, scripts, extension bridge via HTTP rarely).
-    return isLoopbackAddress(req.socket.remoteAddress) || !!config.authToken;
+    return isLocalRequest(req) || !!config.authToken;
   }
 
   const candidate = origin || referer;
@@ -105,8 +118,7 @@ function csrfOk(req) {
 }
 
 function requireAuth(req, res, body, { mutating }) {
-  const remote = req.socket.remoteAddress;
-  const loopback = isLoopbackAddress(remote);
+  const loopback = isLocalRequest(req);
 
   if (config.authToken) {
     const provided = getRequestToken(req, body);
@@ -114,10 +126,11 @@ function requireAuth(req, res, body, { mutating }) {
       sendJson(res, 401, { error: 'Unauthorized' });
       return false;
     }
-  } else if (config.lanExposed && !loopback) {
+  } else if ((config.lanExposed || isProxied(req)) && !loopback) {
     // Phone-on-WiFi without a shared secret is unsafe on many home networks (guest Wi-Fi, IoT, etc.).
     sendJson(res, 401, {
-      error: 'LAN listening is enabled but authToken is empty. Set authToken in config.local.json or YT_REMOTE_AUTH_TOKEN.',
+      error: (isProxied(req) ? 'Request came through a proxy (for example tailscale serve)' : 'LAN listening is enabled')
+        + ' but authToken is empty. Set authToken in config.local.json or YT_REMOTE_AUTH_TOKEN.',
     });
     return false;
   }
@@ -405,6 +418,7 @@ function contentType(filePath) {
     '.js': 'application/javascript; charset=utf-8',
     '.css': 'text/css; charset=utf-8',
     '.json': 'application/json',
+    '.webmanifest': 'application/manifest+json; charset=utf-8',
     '.png': 'image/png',
     '.svg': 'image/svg+xml',
     '.ico': 'image/x-icon',
@@ -522,7 +536,7 @@ async function handleApi(req, res, pathname) {
       // Include lastStatus only for loopback or authenticated callers.
       const body = {};
       const authed = !!(config.authToken && timingSafeEqualString(getRequestToken(req, body), config.authToken));
-      if (isLoopbackAddress(req.socket.remoteAddress) || authed) {
+      if (isLocalRequest(req) || authed) {
         payload.lastStatus = state.lastStatus;
       }
       sendJson(res, 200, payload);
@@ -616,8 +630,7 @@ wss.on('connection', (socket, req) => {
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   const role = url.searchParams.get('role') || 'ui';
   const token = url.searchParams.get('token') || '';
-  const remote = req.socket.remoteAddress;
-  const loopback = isLoopbackAddress(remote);
+  const loopback = isLocalRequest(req);
 
   if (role === 'bridge') {
     // Extension bridge must come from the same machine.
@@ -668,7 +681,7 @@ wss.on('connection', (socket, req) => {
       socket.close(1008, 'unauthorized');
       return;
     }
-  } else if (config.lanExposed && !loopback) {
+  } else if ((config.lanExposed || isProxied(req)) && !loopback) {
     socket.close(1008, 'auth token required for LAN');
     return;
   }
