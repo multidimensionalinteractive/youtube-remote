@@ -1,6 +1,6 @@
 {
   "name": "youtube-remote",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "Local-network phone remote for YouTube playing in Chrome on Windows",
   "main": "server.js",
   "license": "MIT",
@@ -9,12 +9,14 @@
     "test": "node --test test/*.test.js",
     "install-autostart": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\install-autostart.ps1",
     "install-startup": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\install-startup-folder.ps1",
-    "open-firewall": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\open-firewall.ps1"
+    "open-firewall": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\open-firewall.ps1",
+    "setup-phone": "node scripts/setup-phone.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "qrcode-terminal": "^0.12.0",
     "ws": "^8.18.0"
   }
 }

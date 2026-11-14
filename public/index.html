@@ -77,6 +77,12 @@
   .volrow { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; }
   .authbox { display: none; }
   .authbox.show { display: block; }
+  .connect { display: none; }
+  .connect.show { display: block; }
+  .connect h2 { font-size: 1.05rem; margin: 0 0 8px; }
+  .connect .qr { display: block; width: 220px; height: 220px; margin: 10px auto; border-radius: 12px; background: #fff; image-rendering: pixelated; }
+  .connect .link { word-break: break-all; font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; background: var(--card2); border-radius: 10px; padding: 8px 10px; }
+  .connect ol { margin: 6px 0 0; padding-left: 20px; line-height: 1.5; }
   button.toggle-on { background: linear-gradient(135deg, #1f8f4e, #30d158); color: #04140a; }
 </style>
 </head>
@@ -85,6 +91,14 @@
     <h1 style="text-align:center;width:100%;margin:4px 0;">YouTube Remote</h1>
     <div class="row" style="justify-content:center;flex-wrap:wrap;">
       <button id="btnRefresh" type="button" class="pill" title="Tap to wake PC, show YouTube and refresh" aria-label="Connection status, tap to wake PC, show YouTube and refresh" style="cursor:pointer;"><span id="dot" class="dot off"></span><span id="bridgeLabel">Bridge offline</span><span aria-hidden="true" style="opacity:.55;">↻</span></button>
+    </div>
+
+    <div id="connectBox" class="card connect" aria-live="polite">
+      <div class="row" style="justify-content:space-between;">
+        <h2>Connect your phone</h2>
+        <button id="connectHide" type="button" style="min-height:36px;padding:6px 12px;">Hide</button>
+      </div>
+      <div id="connectBody"></div>
     </div>
 
     <div id="authBox" class="card authbox">
@@ -457,11 +471,64 @@ async function systemVolume(body) {
 $('sysVolume').onchange = () => systemVolume({ volume: Number($('sysVolume').value) / 100 });
 $('sysVolDown').onclick = () => systemVolume({ volume: Math.max(0, Number($('sysVolume').value) / 100 - 0.05) });
 $('sysVolUp').onclick = () => systemVolume({ volume: Math.min(1, Number($('sysVolume').value) / 100 + 0.05) });
-systemVolume();
-setInterval(() => systemVolume(), 10000);
-connectWs();
-refresh();
-setInterval(refresh, 4000);
+// "Connect your phone" panel: only on this PC's own browser (127.0.0.1 / localhost).
+// The server refuses /api/phone-link for anyone else because the link holds the token.
+const IS_PC_PAGE = ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(location.hostname);
+const CONNECT_HIDDEN_KEY = 'ytRemoteConnectHidden';
+
+function esc(t) {
+  return String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
+async function loadPhonePanel() {
+  if (!IS_PC_PAGE) return;
+  let info;
+  try {
+    const res = await fetch('/api/phone-link', { cache: 'no-store' });
+    if (!res.ok) return;
+    info = await res.json();
+  } catch (_) { return; }
+  // The PC page uses the same token, so save it here too.
+  if (info.token && !localStorage.getItem(TOKEN_KEY)) localStorage.setItem(TOKEN_KEY, info.token);
+  const body = $('connectBody');
+  if (!info.lanExposed) {
+    body.innerHTML = '<div class="hint">Phone access is off, so the remote only works on this PC right now. '
+      + 'To turn it on, double-click <b>install.cmd</b> again, or run <code>npm run setup-phone</code>, then '
+      + '<code>npm run open-firewall</code> (as admin), then restart the server.</div>';
+  } else if (!info.links.length) {
+    body.innerHTML = '<div class="hint">No home network address found. Connect this PC to Wi-Fi or Ethernet, then restart the server.</div>';
+  } else {
+    const best = info.links[0];
+    const others = info.links.slice(1).map((l) => '<div class="hint">Other address (' + esc(l.adapter) + '): <span class="link">' + esc(l.url) + '</span></div>').join('');
+    body.innerHTML =
+      '<div class="hint">Your phone only needs its web browser. Connect it to the same Wi-Fi as this PC, then scan this code with the phone camera:</div>'
+      + '<img class="qr" alt="QR code with the phone link" src="data:image/svg+xml;charset=utf-8,' + encodeURIComponent(info.qrSvg) + '" />'
+      + '<div class="hint" style="margin-bottom:4px;">Or type this link on the phone (' + esc(best.adapter) + '):</div>'
+      + '<div class="link">' + esc(best.url) + '</div>'
+      + others
+      + '<div class="hint" style="margin-top:10px;"><b>Add it to the home screen:</b><ol>'
+      + '<li><b>iPhone (Safari):</b> tap Share, then Add to Home Screen.</li>'
+      + '<li><b>Android (Chrome):</b> tap the three-dot menu, then Add to Home screen (or Install app).</li>'
+      + '</ol></div>'
+      + (info.hasToken
+        ? '<div class="hint" style="margin-top:8px;">This link and QR code contain your access token. Do not post or share them publicly.</div>'
+        : '<div class="err" style="margin-top:8px;">No access token is set, so anyone on your network could control this remote. Run <code>npm run setup-phone</code> to add one.</div>');
+  }
+  const box = $('connectBox');
+  const forced = location.hash === '#connect';
+  if (forced || sessionStorage.getItem(CONNECT_HIDDEN_KEY) !== '1') box.classList.add('show');
+  $('connectHide').onclick = () => { box.classList.remove('show'); sessionStorage.setItem(CONNECT_HIDDEN_KEY, '1'); };
+  if (forced) box.scrollIntoView({ block: 'start' });
+}
+
+(async () => {
+  await loadPhonePanel();
+  systemVolume();
+  setInterval(() => systemVolume(), 10000);
+  connectWs();
+  refresh();
+  setInterval(refresh, 4000);
+})();
 
 // Show auth box when health reports auth is required and we have no token yet.
 api('/api/health').then((h) => {

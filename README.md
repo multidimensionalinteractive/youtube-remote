@@ -6,8 +6,32 @@ Your iPhone or Android phone (or another device) opens a simple mobile UI served
 
 > This repository is a sanitized, reusable packaging of a working Windows setup. Defaults are **loopback-only** and generic. Enabling LAN listening is an explicit operator choice and should stay on a private/trusted network with an auth token.
 
+## Easy install (Windows)
+
+No terminal needed. Your phone does not need to download anything.
+
+1. **Download** [youtube-remote.zip](https://github.com/multidimensionalinteractive/youtube-remote/releases/latest/download/youtube-remote.zip) (or on this page click **Code > Download ZIP**).
+2. **Extract it**: right-click the ZIP, choose **Extract All...**, and open the extracted folder. Running it from inside the ZIP will not work.
+3. **Double-click `install.cmd`.** If Windows shows "Windows protected your PC", click **More info > Run anyway** (the files are plain scripts you can read in this repo).
+4. Follow the window. It explains each step before doing it:
+   - checks for Node.js 18+ and yt-dlp, and offers to install them with `winget`
+   - runs `npm install`
+   - turns on phone access with a random private access token (an existing token is never replaced)
+   - adds a Windows firewall rule for **Private (home) networks only**; this is the only step that asks for admin
+   - starts the remote automatically when you sign in (Startup folder shortcut)
+   - starts the remote now in the background (restarting an older copy if one is running; it never closes Chrome)
+   - opens Chrome's Extensions page and walks you through **Load unpacked** for the `extension` folder. Chrome does not let any program install an extension silently (that protects you from malware), so this one part is a few clicks by you.
+   - opens the **Connect your phone** page with a QR code
+5. **Scan the QR code** with your phone camera. Then add it to your home screen: iPhone (Safari) **Share > Add to Home Screen**; Android (Chrome) **⋮ > Add to Home screen**.
+
+Running `install.cmd` again is safe: it keeps your settings and token and repairs anything missing. To remove it, double-click **`uninstall.cmd`**: it stops the remote, removes autostart and the firewall rule, and tells you how to remove the extension. Your folder and settings are left for you to delete.
+
+The installer never prints your access token. The only place it shows the full phone link is the **Connect your phone** page on `http://127.0.0.1:8790/`, which the server only serves to this PC's own browser.
+
 ## Features
 
+- **One-click Windows installer** (`install.cmd`) and uninstaller (`uninstall.cmd`) that explain every step
+- **Phone link + QR code** printed on startup and shown on the PC's own page, so connecting a phone is a scan
 - **Mobile UI** at `http://<host>:8790/` (port configurable) for iPhone and Android
 - **Home screen app**: web app manifest, Android and iOS icons (including maskable), standalone full-screen mode, safe-area aware layout
 - **Status pill** (tap): wake PC (small mouse nudge) + show/focus YouTube tab + refresh the remote page
@@ -113,6 +137,24 @@ npm start
 
 By default the server listens on **`127.0.0.1:8790`** only. Open `http://127.0.0.1:8790/` on the PC to verify the UI.
 
+## Connect your phone in 3 steps
+
+The phone only needs its web browser. It does **not** need the ZIP or any app. Everything runs on the PC, and the phone just opens a web page that the PC serves on your home Wi-Fi.
+
+1. On the PC, in this folder, run:
+
+   ```bat
+   npm run setup-phone
+   ```
+
+   This creates or updates `config.local.json` with `host` `0.0.0.0`, `allowLan` `true`, and a random `authToken` (an existing token is never replaced, and the token is not printed).
+2. In an **admin** terminal in this folder, run `npm run open-firewall` (Private networks only). Then run `npm start` (restart it if it was running).
+3. The server prints a **phone link** and a **QR code**. Scan it with the phone camera (phone on the same Wi-Fi), then add it to the home screen. The same link and QR code are on `http://127.0.0.1:8790/` on the PC, in the **Connect your phone** panel.
+
+The phone link looks like `http://<pc-lan-ip>:8790/?token=...`. It contains your access token, so do not post or share it publicly. The phone saves the token on first open and removes it from the address bar.
+
+When phone access is off, the server prints a one-line hint pointing back to these steps. It lists only private home network addresses (Wi-Fi first, then Ethernet) and skips loopback, `169.254.x.x`, WSL / Hyper-V `vEthernet`, Docker, VPN, and other virtual adapters.
+
 ### Load the Chrome extension (recommended)
 
 1. Open Chrome → `chrome://extensions`
@@ -155,6 +197,8 @@ Copy `config.example.json` → **`config.local.json`** (gitignored) and/or use `
 | `cdpProfileDir` | `YT_REMOTE_CHROME_PROFILE` | `./chrome-profile` | Isolated profile for optional CDP Chrome |
 
 ### Phone on Wi‑Fi (LAN) example
+
+`npm run setup-phone` does step 1 for you. To do it by hand:
 
 1. Set in `config.local.json`:
 
@@ -242,11 +286,16 @@ If you already run a machine-specific install that binds `0.0.0.0:8790` without 
 - Fixed PowerShell scripts only (path-checked under `scripts/`)
 - Baseline security headers (`X-Content-Type-Options`, `X-Frame-Options`, CSP); no `Access-Control-Allow-Origin: *`
 - Unauthenticated `/api/health` omits now-playing `lastStatus` (loopback or token required for that detail)
+- The **Connect your phone** data (`/api/phone-link`, which includes the token) is only served to a direct loopback request with a `127.0.0.1` / `localhost` Host header and no cross-site fetch; everyone else gets a 404 (this also blocks DNS rebinding)
+- The installer and uninstaller only stop this app's own `node server.js` process (by PID file or port), never Chrome
 
 ## Troubleshooting
 
 | Symptom | Things to try |
 |---|---|
+| Server never shows a phone address | Phone access is off: run `npm run setup-phone` (or `install.cmd`) and restart. If it says no address was found, connect the PC to Wi-Fi or Ethernet |
+| Phone link times out | Phone must be on the same Wi-Fi (not guest Wi-Fi or mobile data); run `npm run open-firewall` as admin; set the Windows network to Private |
+| `install.cmd` closes right away or says "opened from inside the ZIP" | Extract the ZIP first (right-click > Extract All...), then run `install.cmd` from the extracted folder |
 | Phone cannot connect | Confirm `allowLan`/host bind, Private firewall rule, PC firewall, same subnet/VLAN, Windows network = Private |
 | Bridge offline | Load unpacked extension, refresh YouTube tab, confirm server on port `8790`, check `chrome://extensions` for errors |
 | Search fails | Ensure `yt-dlp` is installed and on `PATH`; try `yt-dlp ytsearch1:test --flat-playlist --dump-json` |

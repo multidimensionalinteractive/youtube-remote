@@ -46,3 +46,6 @@ scripts/extension-in-playing-window.ps1
 scripts/inspect-chrome.ps1
 scripts/install-extension-ui.ps1
 scripts/yt-debug-chrome.ps1
+
+# Running server PID (written by server.js)
+.server.pid

@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { WebSocketServer } = require('ws');
 const { loadConfig } = require('./lib/config');
+const phone = require('./lib/phone');
 const cdp = require('./cdp');
 
 const config = loadConfig();
@@ -78,6 +79,16 @@ function isProxied(req) {
 }
 function isLocalRequest(req) {
   return isLoopbackAddress(req && req.socket && req.socket.remoteAddress) && !isProxied(req);
+}
+
+// True only for the PC's own browser talking to this server directly.
+function isPcLocalPageRequest(req) {
+  if (!isLocalRequest(req)) return false;
+  const host = parseHostHeader(req.headers.host).replace(/:\d+$/, '');
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(host)) return false;
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return false;
+  return true;
 }
 
 function parseHostHeader(hostHeader) {
@@ -543,6 +554,27 @@ async function handleApi(req, res, pathname) {
       return;
     }
 
+    if (pathname === '/api/phone-link' && req.method === 'GET') {
+      // "Connect your phone" panel for the PC's own browser. The link contains the
+      // access token, so it is only served to a direct loopback request (not via a
+      // proxy), addressed to 127.0.0.1/localhost (blocks DNS rebinding), and not
+      // from another site. Everyone else gets a plain 404.
+      if (!isPcLocalPageRequest(req)) {
+        sendJson(res, 404, { error: 'not found' });
+        return;
+      }
+      const links = phone.phoneLinks(config);
+      sendJson(res, 200, {
+        lanExposed: config.lanExposed,
+        hasToken: !!config.authToken,
+        token: config.authToken || '',
+        port: PORT,
+        links: links.map((l) => ({ adapter: l.adapter, address: l.address, url: l.url })),
+        qrSvg: links.length ? phone.qrSvg(links[0].url) : '',
+      });
+      return;
+    }
+
     if (pathname === '/api/system-volume') {
       const body = req.method === 'POST' ? await readBody() : {};
       const mutating = req.method === 'POST' && (typeof body.volume === 'number' || typeof body.muted === 'boolean');
@@ -625,6 +657,8 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
+// Listen errors are handled on `server` (clear message for a busy port); ws re-emits them here.
+wss.on('error', () => {});
 
 wss.on('connection', (socket, req) => {
   const url = new URL(req.url || '/', 'http://127.0.0.1');
@@ -695,7 +729,24 @@ wss.on('connection', (socket, req) => {
   socket.on('close', () => uiClients.delete(socket));
 });
 
+// PID file lets the installer and uninstaller stop exactly this server.
+const PID_FILE = path.join(config.root, '.server.pid');
+function removePidFile() {
+  try {
+    if (fs.readFileSync(PID_FILE, 'utf8').trim() === String(process.pid)) fs.unlinkSync(PID_FILE);
+  } catch (_) {}
+}
+
+server.on('error', (e) => {
+  if (e && e.code === 'EADDRINUSE') {
+    console.error('Port ' + PORT + ' is already in use. Another copy of YouTube Remote may already be running.');
+    process.exit(1);
+  }
+  throw e;
+});
+
 server.listen(PORT, HOST, () => {
+  try { fs.writeFileSync(PID_FILE, String(process.pid)); } catch (_) {}
   console.log('YouTube Remote listening on http://' + HOST + ':' + PORT);
   if (config.lanExposed) {
     console.log('[security] LAN bind enabled. Do NOT port-forward ' + PORT + ' to the internet.');
@@ -705,7 +756,15 @@ server.listen(PORT, HOST, () => {
   } else {
     console.log('[security] Loopback-only bind. Enable allowLan / YT_REMOTE_ALLOW_LAN deliberately for phone-on-WiFi use.');
   }
+  try {
+    const banner = phone.startupLines(config);
+    for (const line of banner.lines) console.log(line);
+    if (banner.qr) console.log(banner.qr);
+  } catch (e) {
+    console.log('[phone] Could not build the phone link: ' + (e.message || e));
+  }
 });
 
+process.on('exit', removePidFile);
 process.on('SIGINT', () => process.exit(0));
 process.on('SIGTERM', () => process.exit(0));
