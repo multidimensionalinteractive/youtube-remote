@@ -41,6 +41,7 @@ The installer never prints your access token. The only place it shows the full p
 - **YouTube loudness** (− / slider / +) via persistent Web Audio **GainNode** when the bridge is attached (separate from **Windows system volume**); remote UI ignores status volume while you are dragging the slider
 - **Bass cut** slider (− / +) via lowshelf filter (neutral default; independent of GainNode loudness / system volume)
 - **Screens off** button: turns the PC monitors off while the video keeps playing (no sleep, no lock); tap the status pill to wake them
+- **Queue ("Up next")**: see what plays next and edit it from your phone. Add search results with **Play next** or **Add to queue**, drag or use Up / Down to reorder, remove items, tap one to play it now, or clear the queue. Also shows YouTube's own next videos (the rest of a playlist or mix, or the autoplay pick) and lets you jump to any of them
 - **Stop after this video** toggle: when On (green), playback pauses at the end of the current video instead of autoplaying the next one; when Off, YouTube keeps playing as normal
 - Fallback **basic mode** when the extension is offline (tab title via UI Automation + media keys)
 - **LAN hardening**: loopback default bind, optional shared `authToken`, CSRF Origin/Host checks, Private-profile firewall helper, minimal unauthenticated `/api/health`
@@ -106,6 +107,27 @@ Tap **Screens off** to turn the monitors off while audio and video keep playing.
 - It does **not** sleep, hibernate, or lock the PC, and it writes no log files.
 - To turn the screens back on, tap the **status pill** (which runs `wakePC`, a tiny mouse nudge), or move the mouse / press a key at the PC. Background status polling never wakes the screens.
 - Some monitors or GPU drivers ignore `SC_MONITORPOWER` or wake on any input event. If the screens come back on by themselves, check for a device (mouse, controller, webcam app) that is sending input.
+
+## Queue (Up next)
+
+The **Up next** card shows what will play after the current video, and lets you change it.
+
+**Your queue** (editable):
+
+- In search results, tap **Play next** to put a video at the front of the queue, or **Add to queue** to put it at the end. Tapping the result itself still plays it right away.
+- Reorder by dragging the **≡** handle (works with touch on iPhone Safari and Android Chrome, and with a mouse), or with the **Up** / **Down** buttons.
+- **Remove** takes a video out. **Clear queue** empties it (it asks first).
+- Tap a video's title to play it now (it leaves the queue).
+- When the current video ends, the next video in your queue starts automatically, before YouTube's own autoplay or playlist. **Next** also plays the front of your queue first. Ads are skipped over: the queue only advances at the end of the real video.
+- **Stop after this video** wins: when it is On, playback stops at the end and the queue waits. Turn it Off (or tap Next) to continue.
+- The queue lives in the YouTube tab's own storage on the PC (`localStorage` for youtube.com), so it survives page reloads and shows the same on every phone. It holds up to 200 videos.
+
+**YouTube's own next videos** (read-only):
+
+- Below your queue, the card lists what YouTube itself will play next: the rest of the current **playlist or mix**, or the single **autoplay** "Up next" video. Tap one to jump to it.
+- These come from YouTube's page, so they cannot be reordered from the remote. To change the order, add videos to your queue instead; your queue always plays first.
+
+Queue actions need the Chrome extension bridge. After updating, reload the unpacked extension on `chrome://extensions` and refresh the YouTube tab (the extension now also loads `queue-core.js`).
 
 ## Stop after this video
 
@@ -308,6 +330,9 @@ If you already run a machine-specific install that binds `0.0.0.0:8790` without 
 | Stop after this video does not stop | Reload the unpacked extension (it needs the `storage` permission) and refresh the YouTube tab; the bridge must be connected |
 | Android: no "Install app" option | Expected over plain HTTP. Use **⋮ > Add to Home screen**, or use the Tailscale HTTPS setup for a full install |
 | Android: home screen icon asks for the token again | The token is saved per address; paste it once at the address the icon opens |
+| Queue does not appear or says the bridge is offline | Reload the unpacked extension on `chrome://extensions`, then refresh the YouTube tab |
+| Queue did not advance at the end | Check that **Stop after this video** is Off; the queue also waits while an ad plays |
+| YouTube's next videos list is empty | It only shows on a watch page with a playlist, mix, or autoplay suggestion; YouTube sometimes changes its page layout, and your own queue keeps working either way |
 | Autostart didn’t run | Check Startup folder shortcut / Task Scheduler task `YouTubeRemoteServer` |
 
 ### Windows permissions / accessibility

@@ -179,6 +179,8 @@
         v.__ytRemoteStopWired = true;
         v.addEventListener('timeupdate', enforceStopAtEnd);
         v.addEventListener('ended', onVideoEnded);
+        v.addEventListener('timeupdate', () => maybeAdvanceQueue(false));
+        v.addEventListener('ended', onQueueEnded);
         v.addEventListener('seeking', enforceStopAtEnd);
         v.addEventListener('seeked', enforceStopAtEnd);
         v.addEventListener('ratechange', enforceStopAtEnd);
@@ -191,6 +193,7 @@
     if (!stopAfterTimer) {
       stopAfterTimer = setInterval(() => {
         try {
+          maybeAdvanceQueue(false);
           if (!stopAfter) return;
           enforceStopAtEnd();
           if (Date.now() < stopAfterGuardUntil) cancelUpNext();
@@ -218,6 +221,161 @@
     }
     return stopAfter;
   }
+
+  // ---------------------------------------------------------------- Queue
+  // The remote's own queue ("Up next"): videos added from the phone with
+  // "Add to queue" / "Play next". It is saved in this site's localStorage so it
+  // survives page loads, and it plays before YouTube's own autoplay / playlist.
+  // "Stop after this video" wins: when it is on, the queue does not advance.
+  const Q = window.YTRemoteQueue;
+  const QUEUE_KEY = 'ytRemoteQueueV1';
+  let queueAdvancingFor = null;
+  let ytQueueCache = { at: 0, value: null };
+
+  function loadQueue() {
+    try { return Q.sanitizeList(JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]')); } catch (_) { return []; }
+  }
+  function saveQueue(list) {
+    try { localStorage.setItem(QUEUE_KEY, JSON.stringify(Q.sanitizeList(list))); } catch (_) {}
+    ytQueueCache.at = 0;
+    setTimeout(() => { try { pushStatus(); } catch (_) {} }, 0);
+  }
+
+  function videoIdFromHref(href) {
+    try {
+      const u = new URL(href, location.origin);
+      const v = u.searchParams.get('v');
+      if (Q.isVideoId(v)) return v;
+      const m = u.pathname.match(/\/shorts\/([A-Za-z0-9_-]{11})/);
+      return m ? m[1] : null;
+    } catch (_) { return null; }
+  }
+
+  function textOf(root, sels) {
+    for (const s of sels) {
+      const el = root.querySelector(s);
+      const t = el && (el.getAttribute('title') || el.textContent);
+      if (t && t.trim()) return Q.cleanText(t, 200);
+    }
+    return '';
+  }
+
+  // What YouTube itself will play next: the rest of a playlist / mix, or the
+  // single autoplay "Up next" video. Read-only (YouTube does not expose edits).
+  function readYouTubeQueue() {
+    if (Date.now() - ytQueueCache.at < 1500 && ytQueueCache.value) return ytQueueCache.value;
+    let value = { kind: null, items: [], playlistId: null };
+    try {
+      const u = new URL(location.href);
+      const list = u.searchParams.get('list');
+      const rows = Array.from(document.querySelectorAll('ytd-watch-flexy ytd-playlist-panel-renderer ytd-playlist-panel-video-renderer, ytd-playlist-panel-renderer#playlist ytd-playlist-panel-video-renderer'));
+      const seenRows = new Set();
+      const unique = rows.filter((r) => (seenRows.has(r) ? false : (seenRows.add(r), true)));
+      if (list && unique.length) {
+        let cur = unique.findIndex((r) => r.hasAttribute('selected'));
+        const items = [];
+        unique.forEach((r, index) => {
+          if (index <= cur) return;
+          const a = r.querySelector('a#wc-endpoint, a[href*="watch?v="]');
+          const id = a && videoIdFromHref(a.getAttribute('href'));
+          if (!id || items.length >= 25) return;
+          items.push({ id, index, title: textOf(r, ['#video-title']), channel: textOf(r, ['#byline', '#channel-name']) });
+        });
+        value = { kind: 'playlist', items, playlistId: Q.cleanText(list, 64) };
+      } else {
+        let id = null;
+        let title = '';
+        const nextBtn = document.querySelector('.ytp-next-button');
+        if (nextBtn && nextBtn.getAttribute('href')) {
+          id = videoIdFromHref(nextBtn.getAttribute('href'));
+          title = Q.cleanText(nextBtn.getAttribute('data-tooltip-text') || '', 200);
+        }
+        if (!id) {
+          const first = document.querySelector('#secondary ytd-compact-video-renderer a[href*="watch?v="], #secondary yt-lockup-view-model a[href*="watch?v="]');
+          if (first) {
+            id = videoIdFromHref(first.getAttribute('href'));
+            const card = first.closest('ytd-compact-video-renderer, yt-lockup-view-model') || first;
+            title = title || textOf(card, ['#video-title', 'h3', 'a[title]']);
+          }
+        }
+        if (id && id !== getVideoId()) value = { kind: 'autoplay', items: [{ id, index: null, title: title || 'Up next', channel: '' }], playlistId: null };
+      }
+    } catch (_) {}
+    ytQueueCache = { at: Date.now(), value };
+    return value;
+  }
+
+  function goToVideo(id, extra = '') {
+    queueAdvancingFor = getVideoId();
+    location.href = 'https://www.youtube.com/watch?v=' + id + extra;
+  }
+
+  function playQueueItem(uid) {
+    const { list, item } = Q.take(loadQueue(), uid);
+    if (!item) return false;
+    saveQueue(list);
+    goToVideo(item.id);
+    return true;
+  }
+
+  // Called on timeupdate, on ended, and every 200ms.
+  function maybeAdvanceQueue(ended) {
+    const v = videoEl();
+    const queue = loadQueue();
+    const go = Q.shouldAdvance({
+      queueLength: queue.length,
+      stopAfter: !!stopAfter,
+      adPlaying: isAdPlaying(),
+      duration: v ? v.duration : NaN,
+      currentTime: v ? v.currentTime : 0,
+      ended: !!ended || !!(v && v.ended),
+      alreadyAdvancing: queueAdvancingFor !== null && queueAdvancingFor === getVideoId(),
+    });
+    if (!go) return;
+    pauseHard();
+    cancelUpNext();
+    playQueueItem(null);
+  }
+  function onQueueEnded() { maybeAdvanceQueue(true); }
+
+  function queueStatus() {
+    return { queue: loadQueue(), ytQueue: readYouTubeQueue() };
+  }
+
+  function handleQueue(action, msg) {
+    switch (action) {
+      case 'queueAdd': {
+        const { list } = Q.add(loadQueue(), msg.video, { next: !!msg.next });
+        saveQueue(list);
+        return true;
+      }
+      case 'queueRemove': saveQueue(Q.remove(loadQueue(), String(msg.uid || ''))); return true;
+      case 'queueMove': saveQueue(Q.move(loadQueue(), String(msg.uid || ''), Number(msg.to))); return true;
+      case 'queueClear': saveQueue([]); return true;
+      case 'queuePlay':
+        if (!playQueueItem(String(msg.uid || ''))) throw new Error('That video is no longer in the queue');
+        return true;
+      case 'ytQueuePlay': {
+        const id = String(msg.videoId || '');
+        if (!Q.isVideoId(id)) throw new Error('A valid YouTube video id is required');
+        const yq = readYouTubeQueue();
+        const p = player();
+        if (yq.kind === 'playlist' && Number.isInteger(msg.index) && p && typeof p.playVideoAt === 'function') {
+          p.playVideoAt(msg.index);
+        } else if (yq.kind === 'playlist' && yq.playlistId) {
+          goToVideo(id, '&list=' + encodeURIComponent(yq.playlistId));
+        } else {
+          goToVideo(id);
+        }
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+  window.addEventListener('storage', (e) => { if (e.key === QUEUE_KEY) { ytQueueCache.at = 0; try { pushStatus(); } catch (_) {} } });
+  // YouTube single-page navigation finished: reset the advance guard and re-read its list.
+  document.addEventListener('yt-navigate-finish', () => { ytQueueCache.at = 0; if (queueAdvancingFor !== getVideoId()) queueAdvancingFor = null; });
 
   function getStatus() {
     const v = videoEl();
@@ -285,6 +443,7 @@
       bassAttached: !!(bassState.source && bassState.attachedVideo),
       gain: bassState.gain ? bassState.gain.gain.value : null,
       stopAfter: !!stopAfter,
+      ...queueStatus(),
     };
   }
 
@@ -575,7 +734,17 @@
         else if (v) v.muted = false;
         return getStatus();
       }
+      case 'queueAdd':
+      case 'queueRemove':
+      case 'queueMove':
+      case 'queueClear':
+      case 'queuePlay':
+      case 'ytQueuePlay':
+        handleQueue(action, msg);
+        return getStatus();
       case 'next': {
+        // Your queue plays before YouTube's own next video.
+        if (loadQueue().length) { playQueueItem(null); return getStatus(); }
         if (p && typeof p.nextVideo === 'function') p.nextVideo();
         else {
           const btn = document.querySelector('.ytp-next-button, .ytp-next-button.ytp-button');

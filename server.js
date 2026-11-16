@@ -21,7 +21,42 @@ const MUTATING_ACTIONS = new Set([
   'volumeBy', 'setVolume', 'toggleMute', 'mute', 'unmute',
   'seekBy', 'seekTo', 'setBass', 'bassBy', 'reloadExtension', 'cleanupYouTube',
   'screensOff', 'setStopAfter', 'toggleStopAfter',
+  'queueAdd', 'queueRemove', 'queueMove', 'queueClear', 'queuePlay', 'ytQueuePlay',
 ]);
+
+const queueCore = require('./extension/queue-core');
+const QUEUE_ACTIONS = new Set(['queueAdd', 'queueRemove', 'queueMove', 'queueClear', 'queuePlay', 'ytQueuePlay']);
+
+// Rebuilds queue commands from known fields only, so nothing else from the
+// request is forwarded to the YouTube tab. Throws on bad input.
+function sanitizeQueueCommand(action, body) {
+  const uid = typeof body.uid === 'string' && /^[a-z0-9]{4,32}$/i.test(body.uid) ? body.uid : '';
+  switch (action) {
+    case 'queueAdd': {
+      const item = queueCore.sanitizeItem(body.video || {});
+      if (!item) throw new Error('A valid YouTube video id is required');
+      return { action, next: body.next === true, video: { id: item.id, title: item.title, channel: item.channel } };
+    }
+    case 'queueRemove':
+    case 'queuePlay':
+      if (!uid) throw new Error('uid required');
+      return { action, uid };
+    case 'queueMove': {
+      const to = Number(body.to);
+      if (!uid || !Number.isInteger(to) || to < 0 || to > queueCore.MAX_ITEMS) throw new Error('uid and a valid position are required');
+      return { action, uid, to };
+    }
+    case 'queueClear':
+      return { action };
+    case 'ytQueuePlay': {
+      if (!queueCore.isVideoId(body.videoId)) throw new Error('A valid YouTube video id is required');
+      const index = Number.isInteger(body.index) && body.index >= 0 && body.index < 5000 ? body.index : null;
+      return { action, videoId: body.videoId, index };
+    }
+    default:
+      throw new Error('Unsupported action');
+  }
+}
 
 const state = {
   bridgeConnected: false,
@@ -631,7 +666,16 @@ async function handleApi(req, res, pathname) {
         sendJson(res, 400, { error: 'unsupported or missing action' });
         return;
       }
-      const result = await callBridgeOrNative(action, body);
+      let payload = body;
+      if (QUEUE_ACTIONS.has(action)) {
+        try {
+          payload = sanitizeQueueCommand(action, body);
+        } catch (e) {
+          sendJson(res, 400, { error: e.message });
+          return;
+        }
+      }
+      const result = await callBridgeOrNative(action, payload);
       if (result && result.status) {
         state.lastStatus = result.status;
         state.lastStatusAt = Date.now();

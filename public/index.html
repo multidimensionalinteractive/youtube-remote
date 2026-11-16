@@ -77,6 +77,23 @@
   .volrow { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; }
   .authbox { display: none; }
   .authbox.show { display: block; }
+  .result-wrap { display: flex; flex-direction: column; gap: 6px; }
+  .result-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .result-actions button { min-height: 38px; padding: 8px 10px; font-size: 0.85rem; }
+  .qhead { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .qhead h2 { font-size: 1.05rem; margin: 0; }
+  .qhead button { min-height: 36px; padding: 6px 12px; font-size: 0.85rem; }
+  .qlist { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .qitem { display: grid; grid-template-columns: 34px 64px minmax(0, 1fr); gap: 4px 8px; align-items: center; padding: 6px; border-radius: 14px; background: var(--card2); border: 1px solid transparent; }
+  .qitem.dragging { border-color: var(--accent); box-shadow: var(--shadow); position: relative; z-index: 2; opacity: 0.95; }
+  .qitem img { width: 64px; height: 36px; border-radius: 8px; object-fit: cover; background: #000; }
+  .qhandle { min-height: 44px; min-width: 34px; padding: 0; background: transparent; color: var(--muted); font-size: 1.2rem; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+  .qinfo { appearance: none; background: transparent; border: 0; padding: 0 2px; min-height: 44px; text-align: left; color: var(--text); overflow: hidden; }
+  .qinfo .t { font-size: 0.88rem; font-weight: 650; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .qinfo .c { color: var(--muted); font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .qbtns { grid-column: 2 / 4; display: flex; justify-content: flex-end; gap: 6px; }
+  .qbtns button { min-height: 36px; padding: 4px 12px; font-size: 0.8rem; background: var(--card); }
+  .qsub { color: var(--muted); font-size: 0.8rem; margin: 12px 0 0; }
   .connect { display: none; }
   .connect.show { display: block; }
   .connect h2 { font-size: 1.05rem; margin: 0 0 8px; }
@@ -117,7 +134,7 @@
       </form>
       <div id="searchErr" class="err" style="margin-top:8px;"></div>
       <div id="results" class="results" style="margin-top:10px;"></div>
-      <p class="hint" style="margin-top:10px;">Tip: keep a YouTube tab open on the PC. Choosing a result loads it in that tab and closes duplicate YouTube tabs when the extension bridge is connected.</p>
+      <p class="hint" style="margin-top:10px;">Tip: keep a YouTube tab open on the PC. Tap a result to play it now, or use Play next / Add to queue to line it up. Playing a result closes duplicate YouTube tabs when the extension bridge is connected.</p>
     </div>
 
     <div class="card">
@@ -135,6 +152,18 @@
           <span class="meta" id="tDur">0:00</span>
         </div>
       </div>
+    </div>
+
+    <div class="card" id="queueCard">
+      <div class="qhead">
+        <h2>Up next</h2>
+        <button id="queueClear" type="button" disabled>Clear queue</button>
+      </div>
+      <div id="queueList" class="qlist" aria-label="Your queue"></div>
+      <div id="queueEmpty" class="meta" style="margin-top:8px;">Your queue is empty. Search for a video and tap "Add to queue" or "Play next".</div>
+      <p id="ytQueueTitle" class="qsub" hidden></p>
+      <div id="ytQueueList" class="qlist" style="margin-top:6px;" aria-label="YouTube's own next videos"></div>
+      <div id="queueErr" class="err" style="margin-top:8px;"></div>
     </div>
 
     <div class="card">
@@ -279,7 +308,167 @@ function renderStatus(st) {
   if (st.bassError) $('bassState').textContent = 'unavailable';
   else if (state.bridgeConnected) $('bassState').textContent = '';
   if (typeof st.stopAfter === 'boolean') renderStopAfter(st.stopAfter);
+  if (Array.isArray(st.queue)) renderQueue(st.queue, st.ytQueue || null);
 }
+
+// ---------------------------------------------------------------- Queue panel
+const queueUi = { dragging: false, holdUntil: 0, sig: '', items: [] };
+const thumbUrl = (id) => 'https://i.ytimg.com/vi/' + encodeURIComponent(id) + '/mqdefault.jpg';
+
+async function queueCommand(action, extra, btn, doneText) {
+  $('queueErr').textContent = '';
+  queueUi.holdUntil = 0;
+  const label = btn ? btn.textContent : '';
+  if (btn) btn.disabled = true;
+  try {
+    await command(action, extra);
+    if (btn && doneText) { btn.textContent = doneText; setTimeout(() => { btn.textContent = label; }, 1400); }
+  } catch (e) {
+    $('queueErr').textContent = e.message || String(e);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function queueRow(item, { index, total, editable }) {
+  const row = document.createElement('div');
+  row.className = 'qitem';
+  row.dataset.uid = item.uid || '';
+  const handle = document.createElement('button');
+  handle.type = 'button';
+  handle.className = 'qhandle';
+  handle.textContent = editable ? '\u2261' : String((item.index != null ? item.index + 1 : index + 1));
+  handle.setAttribute('aria-label', editable ? 'Drag to reorder' : 'Position');
+  if (!editable) { handle.disabled = true; handle.style.touchAction = 'auto'; handle.style.cursor = 'default'; }
+  const img = document.createElement('img');
+  img.alt = '';
+  img.loading = 'lazy';
+  img.src = thumbUrl(item.id);
+  const info = document.createElement('button');
+  info.type = 'button';
+  info.className = 'qinfo';
+  info.setAttribute('aria-label', 'Play ' + (item.title || 'video') + ' now');
+  info.innerHTML = '<div class="t"></div><div class="c"></div>';
+  info.querySelector('.t').textContent = item.title || 'YouTube video';
+  info.querySelector('.c').textContent = item.channel || (editable ? 'Tap to play now' : 'Tap to jump here');
+  row.append(handle, img, info);
+  if (editable) {
+    info.onclick = () => queueCommand('queuePlay', { uid: item.uid });
+    const btns = document.createElement('div');
+    btns.className = 'qbtns';
+    const mk = (text, aria, fn, disabled) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = text;
+      b.setAttribute('aria-label', aria);
+      b.disabled = !!disabled;
+      b.onclick = fn;
+      return b;
+    };
+    btns.append(
+      mk('\u2191 Up', 'Move up', () => queueCommand('queueMove', { uid: item.uid, to: index - 1 }), index === 0),
+      mk('\u2193 Down', 'Move down', () => queueCommand('queueMove', { uid: item.uid, to: index + 1 }), index === total - 1),
+      mk('\u2715 Remove', 'Remove from queue', () => queueCommand('queueRemove', { uid: item.uid }))
+    );
+    row.append(btns);
+    enableDrag(handle, row);
+  } else {
+    info.onclick = () => queueCommand('ytQueuePlay', { videoId: item.id, index: item.index });
+  }
+  return row;
+}
+
+function renderQueue(queue, yt) {
+  // Do not redraw under the user's finger, or right after a local reorder.
+  if (queueUi.dragging || Date.now() < queueUi.holdUntil) return;
+  const sig = JSON.stringify([queue.map((i) => i.uid + i.id), yt && yt.kind, yt && yt.items.map((i) => i.id + ':' + i.index)]);
+  if (sig === queueUi.sig) return;
+  queueUi.sig = sig;
+  queueUi.items = queue.slice();
+  const list = $('queueList');
+  list.innerHTML = '';
+  queue.forEach((item, index) => list.appendChild(queueRow(item, { index, total: queue.length, editable: true })));
+  $('queueEmpty').hidden = queue.length > 0;
+  $('queueClear').disabled = queue.length === 0;
+  const ytList = $('ytQueueList');
+  ytList.innerHTML = '';
+  const ytItems = (yt && Array.isArray(yt.items)) ? yt.items : [];
+  if (ytItems.length) {
+    const after = queue.length ? ', after your queue' : '';
+    $('ytQueueTitle').textContent = (yt.kind === 'playlist' ? 'Next in this YouTube playlist' : 'YouTube autoplay next') + after;
+    $('ytQueueTitle').hidden = false;
+    ytItems.slice(0, 8).forEach((item, index) => ytList.appendChild(queueRow(item, { index, total: ytItems.length, editable: false })));
+    if (ytItems.length > 8) {
+      const more = document.createElement('div');
+      more.className = 'meta';
+      more.textContent = 'and ' + (ytItems.length - 8) + ' more in YouTube';
+      ytList.appendChild(more);
+    }
+  } else {
+    $('ytQueueTitle').hidden = true;
+  }
+}
+
+// Drag to reorder with pointer events (mouse, iPhone Safari, Android Chrome).
+// The handle has touch-action: none, so the page does not scroll while dragging.
+function enableDrag(handle, row) {
+  let grabOffset = 0;
+  let pointerId = null;
+  const list = $('queueList');
+  const rows = () => Array.from(list.querySelectorAll('.qitem'));
+  function onMove(e) {
+    if (e.pointerId !== pointerId) return;
+    e.preventDefault();
+    let before = null;
+    for (const r of rows()) {
+      if (r === row) continue;
+      const b = r.getBoundingClientRect();
+      if (e.clientY < b.top + b.height / 2) { before = r; break; }
+    }
+    if (row.nextElementSibling !== before) list.insertBefore(row, before);
+    // Keep the row under the finger: measure its resting spot, then offset it.
+    row.style.transform = '';
+    const restTop = row.getBoundingClientRect().top;
+    row.style.transform = 'translateY(' + (e.clientY - grabOffset - restTop) + 'px)';
+  }
+  function onUp(e) {
+    if (e.pointerId !== pointerId) return;
+    handle.removeEventListener('pointermove', onMove);
+    handle.removeEventListener('pointerup', onUp);
+    handle.removeEventListener('pointercancel', onUp);
+    row.classList.remove('dragging');
+    row.style.transform = '';
+    queueUi.dragging = false;
+    const uid = row.dataset.uid;
+    const to = rows().map((r) => r.dataset.uid).indexOf(uid);
+    const from = queueUi.items.findIndex((i) => i.uid === uid);
+    queueUi.sig = '';
+    if (to >= 0 && to !== from) {
+      queueUi.holdUntil = Date.now() + 2500;
+      queueCommand('queueMove', { uid, to }).finally(() => { queueUi.holdUntil = 0; });
+    } else if (state.status) {
+      renderQueue(state.status.queue || [], state.status.ytQueue || null);
+    }
+  }
+  handle.addEventListener('pointerdown', (e) => {
+    if (e.button != null && e.button !== 0) return;
+    pointerId = e.pointerId;
+    grabOffset = e.clientY - row.getBoundingClientRect().top;
+    queueUi.dragging = true;
+    row.classList.add('dragging');
+    try { handle.setPointerCapture(pointerId); } catch (_) {}
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+    handle.addEventListener('pointercancel', onUp);
+  });
+  // Keep iOS Safari from scrolling the page while a drag is in progress.
+  handle.addEventListener('touchmove', (e) => { if (queueUi.dragging) e.preventDefault(); }, { passive: false });
+}
+
+$('queueClear').onclick = () => {
+  if (!queueUi.items.length) return;
+  if (confirm('Clear all ' + queueUi.items.length + ' videos from your queue?')) queueCommand('queueClear', {});
+};
 
 function renderStopAfter(on) {
   const btn = $('btnStopAfter');
@@ -359,14 +548,30 @@ $('searchForm').addEventListener('submit', async (e) => {
     }
     $('results').innerHTML = '';
     for (const r of list) {
+      const wrap = document.createElement('div');
+      wrap.className = 'result-wrap';
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'result';
-      btn.innerHTML = '<img alt="" src="' + (r.thumbnail || '') + '" /><div><p class="t"></p><div class="c"></div></div>';
+      btn.innerHTML = '<img alt="" /><div><p class="t"></p><div class="c"></div></div>';
+      btn.querySelector('img').src = r.thumbnail || ('https://i.ytimg.com/vi/' + r.id + '/hqdefault.jpg');
       btn.querySelector('.t').textContent = r.title;
       btn.querySelector('.c').textContent = r.channel || r.id;
       btn.addEventListener('click', () => command('load', { videoId: r.id, url: r.url }));
-      $('results').appendChild(btn);
+      const actions = document.createElement('div');
+      actions.className = 'result-actions';
+      const video = { id: r.id, title: r.title, channel: r.channel || '' };
+      const playNext = document.createElement('button');
+      playNext.type = 'button';
+      playNext.textContent = 'Play next';
+      playNext.addEventListener('click', () => queueCommand('queueAdd', { video, next: true }, playNext, 'Added to play next'));
+      const addQ = document.createElement('button');
+      addQ.type = 'button';
+      addQ.textContent = 'Add to queue';
+      addQ.addEventListener('click', () => queueCommand('queueAdd', { video, next: false }, addQ, 'Added to queue'));
+      actions.append(playNext, addQ);
+      wrap.append(btn, actions);
+      $('results').appendChild(wrap);
     }
   } catch (err) {
     $('results').innerHTML = '';
