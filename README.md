@@ -35,7 +35,8 @@ The installer never prints your access token. The only place it shows the full p
 - **Mobile UI** at `http://<host>:8790/` (port configurable) for iPhone and Android
 - **Home screen app**: web app manifest, Android and iOS icons (including maskable), standalone full-screen mode, safe-area aware layout
 - **Status pill** (tap): wake PC (small mouse nudge) + show/focus YouTube tab + refresh the remote page
-- **Search** via `yt-dlp` (`ytsearch`); choosing a result loads the video in the existing YouTube tab and closes duplicate YouTube tabs when the extension bridge is connected
+- **Tab picker**: with several YouTube tabs or windows open, a **tabs** button next to the status pill lists them all (title, thumbnail, playing or paused, which window). Tap one to control it; your pick is remembered and other tabs can no longer take over the remote
+- **Search** via `yt-dlp` (`ytsearch`); choosing a result loads the video in the YouTube tab you are controlling
 - **Playback**: play/pause, −10s / +10s seek, previous, next
 - **Now playing** title/channel/thumbnail + seek bar (best with extension)
 - **YouTube loudness** (− / slider / +) via persistent Web Audio **GainNode** when the bridge is attached (separate from **Windows system volume**); remote UI ignores status volume while you are dragging the slider
@@ -57,7 +58,8 @@ Phone browser  --HTTP/WS-->  Node server (server.js)  --WS-->  Chrome extension 
 ```
 
 - **`server.js`** serves `public/`, `/api/*`, and WebSockets (`role=ui` for the phone, `role=bridge` for the extension).
-- **`extension/`** MV3 unpacked extension: content script connects to `ws://127.0.0.1:8790/?role=bridge` and executes player actions.
+- **`extension/`** MV3 unpacked extension: every YouTube tab's content script connects to `ws://127.0.0.1:8790/?role=bridge&tab=<its tab id>` and executes player actions.
+- **`lib/tabs.js`** keeps the list of connected YouTube tabs and decides which one the remote controls.
 - **`scripts/*.ps1`** are fixed helpers invoked by the server (not arbitrary shell from the network).
 - Search shells out to **`yt-dlp`** only with a constructed `ytsearchN:query` invocation (no free-form shell).
 
@@ -94,7 +96,7 @@ The bridge content script inserts a **Web Audio** graph on the managed YouTube `
 - Bass amount persists for the tab via `sessionStorage`
 - On `pagehide`, the context is suspended (not torn down) to avoid breaking ongoing playback plumbing
 
-Tune `BASS_CONFIG` in `extension/content.js` (mirror defaults live in `lib/bass.js` for tests). No remote CDN or extra extension permissions are required for bass. The extension uses only the YouTube + local bridge host permissions, `tabs` for focus/cleanup helpers, and `storage` to remember the Stop after this video setting.
+Tune `BASS_CONFIG` in `extension/content.js` (mirror defaults live in `lib/bass.js` for tests). No remote CDN or extra extension permissions are required for bass. The extension uses only the YouTube + local bridge host permissions, `tabs` to know each YouTube tab's id and window and to bring a tab to the front, and `storage` to remember the Stop after this video setting.
 
 Reload the unpacked extension after changing `BASS_CONFIG` or `content.js`.
 
@@ -128,6 +130,21 @@ The **Up next** card shows what will play after the current video, and lets you 
 - These come from YouTube's page, so they cannot be reordered from the remote. To change the order, add videos to your queue instead; your queue always plays first.
 
 Queue actions need the Chrome extension bridge. After updating, reload the unpacked extension on `chrome://extensions` and refresh the YouTube tab (the extension now also loads `queue-core.js`).
+
+## Multiple YouTube tabs
+
+If you have more than one YouTube tab or window open, every one of them connects to the server, and the remote controls one at a time.
+
+- Tap the **tabs** button next to the status pill (for example **3 tabs**). The list shows each tab's video, whether it is playing or paused, and which window it is in when you have more than one.
+- **Tap a tab** to control it. From then on everything on the remote goes to that tab only: play/pause, seek, Next, search results, Now Playing, the queue, Stop after this video, YouTube volume and bass. Other tabs keep playing or sitting paused, untouched.
+- **Show on PC** does the same and also brings that tab to the front on the PC.
+- Your pick is saved on the PC (`.selected-tab.json` next to `server.js`), so it survives a server restart. Status updates from other tabs never change it.
+- **Auto** (the default, or tap **Switch to Auto**) follows whatever is playing: it stays on the current tab while it plays and only moves when that tab is paused and another tab is playing.
+- If the tab you picked is closed, the remote switches to a playing tab (or else the one you used most recently) and shows a yellow note saying which tab it is controlling now. A tab that is only reloading or moving to the next video keeps its place.
+- Only the tab you control runs your queue and Stop after this video. Your queue is shared by all YouTube tabs (it lives in youtube.com's storage), but it only advances in the controlled tab.
+- Playing something no longer closes your other YouTube tabs. To close them on purpose, send the `cleanupYouTube` action.
+
+Older builds of the extension connected one tab at a time and each new tab kicked the previous one off, which made the remote jump between tabs. After updating, reload the unpacked extension on `chrome://extensions` (it also refreshes your YouTube tabs).
 
 ## Stop after this video
 
@@ -333,6 +350,9 @@ If you already run a machine-specific install that binds `0.0.0.0:8790` without 
 | Queue does not appear or says the bridge is offline | Reload the unpacked extension on `chrome://extensions`, then refresh the YouTube tab |
 | Queue did not advance at the end | Check that **Stop after this video** is Off; the queue also waits while an ad plays |
 | YouTube's next videos list is empty | It only shows on a watch page with a playlist, mix, or autoplay suggestion; YouTube sometimes changes its page layout, and your own queue keeps working either way |
+| Remote keeps switching between YouTube tabs | Update and reload the unpacked extension, then pick a tab from the **tabs** button; older extension builds made tabs take turns |
+| Tabs button does not show | It appears once a YouTube tab with the updated extension is connected; reload the extension and refresh your YouTube tabs |
+| Remote controls the wrong tab after closing one | It fell back to a playing or recent tab (see the yellow note); open the tabs list and tap the one you want |
 | Autostart didn’t run | Check Startup folder shortcut / Task Scheduler task `YouTubeRemoteServer` |
 
 ### Windows permissions / accessibility

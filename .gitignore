@@ -49,3 +49,6 @@ scripts/yt-debug-chrome.ps1
 
 # Running server PID (written by server.js)
 .server.pid
+
+# Which YouTube tab the remote controls (written by server.js)
+.selected-tab.json

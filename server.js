@@ -9,6 +9,7 @@ const { WebSocketServer } = require('ws');
 const { loadConfig } = require('./lib/config');
 const phone = require('./lib/phone');
 const cdp = require('./cdp');
+const { createTabRegistry, isTabKey } = require('./lib/tabs');
 
 const config = loadConfig();
 const PORT = config.port;
@@ -22,6 +23,7 @@ const MUTATING_ACTIONS = new Set([
   'seekBy', 'seekTo', 'setBass', 'bassBy', 'reloadExtension', 'cleanupYouTube',
   'screensOff', 'setStopAfter', 'toggleStopAfter',
   'queueAdd', 'queueRemove', 'queueMove', 'queueClear', 'queuePlay', 'ytQueuePlay',
+  'selectTab',
 ]);
 
 const queueCore = require('./extension/queue-core');
@@ -64,7 +66,6 @@ const state = {
   lastStatusAt: null,
 };
 
-let bridgeSocket = null;
 const uiClients = new Set();
 const pending = new Map();
 let basicStatus = null;
@@ -424,7 +425,8 @@ async function callBridgeOrNative(action, payload = {}, timeoutMs = 8000) {
   if (action === 'wakePC') return wakePC();
   if (action === 'screensOff') return screensOff();
 
-  if (bridgeSocket && bridgeSocket.readyState === 1) {
+  if (action === 'selectTab') return selectTab(payload);
+  if (tabs.connectedCount() > 0 || tabs.selected()) {
     return callBridge(action, payload, timeoutMs);
   }
   if (action === 'ensureChrome') {
@@ -441,19 +443,159 @@ async function callBridgeOrNative(action, payload = {}, timeoutMs = 8000) {
   return nativeCommand(action, payload);
 }
 
-function callBridge(action, payload = {}, timeoutMs = 8000) {
+async function callBridge(action, payload = {}, timeoutMs = 8000) {
+  const socket = await waitForSelectedSocket(Math.min(5000, timeoutMs));
+  if (!socket) throw new Error('YouTube bridge not connected. Open YouTube in Chrome with the extension loaded.');
   return new Promise((resolve, reject) => {
-    if (!bridgeSocket || bridgeSocket.readyState !== 1) {
-      reject(new Error('YouTube bridge not connected. Open YouTube in Chrome with the extension loaded.'));
-      return;
-    }
     const id = reqId++;
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error('Bridge timed out on action: ' + action));
     }, timeoutMs);
-    pending.set(id, { resolve, reject, timer });
-    bridgeSocket.send(JSON.stringify({ id, action, ...payload }));
+    pending.set(id, { resolve, reject, timer, socket, action });
+    socket.send(JSON.stringify({ id, action, ...payload }));
+  });
+}
+
+// ------------------------------------------------------------ YouTube tabs
+// Every open YouTube tab connects its own bridge socket. The registry in
+// lib/tabs.js decides which tab the remote controls; commands, Now Playing,
+// queue, Stop after, volume and bass all go to that one tab only. The tab you
+// pick is saved so it survives a server restart.
+const SELECTED_TAB_FILE = process.env.YT_REMOTE_SELECTED_TAB_FILE || path.join(__dirname, '.selected-tab.json');
+function loadPinnedTab() {
+  try {
+    const j = JSON.parse(fs.readFileSync(SELECTED_TAB_FILE, 'utf8'));
+    return isTabKey(j && j.tab) ? j.tab : null;
+  } catch (_) { return null; }
+}
+function savePinnedTab(key) {
+  try {
+    if (key) fs.writeFileSync(SELECTED_TAB_FILE, JSON.stringify({ tab: key }));
+    else if (fs.existsSync(SELECTED_TAB_FILE)) fs.unlinkSync(SELECTED_TAB_FILE);
+  } catch (_) {}
+}
+const tabs = createTabRegistry({ pinned: loadPinnedTab() });
+let tabsSig = '';
+let lastSelectedTab = null;
+let lastPinnedTab = tabs.pinnedKey;
+let lastBridgeConnected = false;
+// Actions that load a new page in the tab, so its socket closes right after.
+const NAVIGATING_ACTIONS = new Set(['load', 'next', 'prev', 'queuePlay', 'ytQueuePlay', 'reloadExtension']);
+
+function tellTabsWhoIsControlled() {
+  for (const { key, socket } of tabs.sockets()) {
+    try { socket.send(JSON.stringify({ type: 'control', controlled: key === tabs.selectedKey })); } catch (_) {}
+  }
+}
+
+// Re-evaluate the selection and push anything that changed to the phones.
+function syncTabs(force = false) {
+  tabs.resolve();
+  const changed = tabs.selectedKey !== lastSelectedTab;
+  lastSelectedTab = tabs.selectedKey;
+  if (tabs.pinnedKey !== lastPinnedTab) { lastPinnedTab = tabs.pinnedKey; savePinnedTab(lastPinnedTab); }
+  state.bridgeConnected = tabs.connectedCount() > 0;
+  if (state.bridgeConnected !== lastBridgeConnected) {
+    lastBridgeConnected = state.bridgeConnected;
+    broadcast({ type: 'bridge', bridgeConnected: state.bridgeConnected });
+  }
+  if (changed) {
+    tellTabsWhoIsControlled();
+    const sel = tabs.selected();
+    if (sel && sel.status) {
+      state.lastStatus = sel.status;
+      state.lastStatusAt = Date.now();
+      broadcast({ type: 'status', status: sel.status, bridgeConnected: state.bridgeConnected });
+    }
+  }
+  const sig = tabs.signature();
+  if (force || changed || sig !== tabsSig) {
+    tabsSig = sig;
+    broadcast({ type: 'tabs', tabs: tabs.snapshot() });
+  }
+}
+setInterval(() => { try { syncTabs(); } catch (_) {} }, 1000).unref();
+
+// The controlled tab may be reconnecting (page load, queue jump). Wait briefly.
+function waitForSelectedSocket(timeoutMs) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    (function check() {
+      const s = tabs.selectedSocket();
+      if (s && s.readyState === 1) { resolve(s); return; }
+      if (!tabs.selected() || Date.now() - start >= timeoutMs) { resolve(null); return; }
+      setTimeout(check, 100);
+    })();
+  });
+}
+
+async function selectTab(body) {
+  const raw = body && body.tab;
+  const key = raw == null || raw === '' || raw === 'auto' ? 'auto' : String(raw);
+  if (key !== 'auto' && !isTabKey(key)) throw new Error('Unknown tab');
+  tabs.select(key);
+  syncTabs(true);
+  let focused = false;
+  if (body && body.focus === true && tabs.selectedSocket()) {
+    try { await callBridge('showYouTube', {}, 6000); focused = true; } catch (_) {}
+  }
+  const sel = tabs.selected();
+  return { ok: true, focused, tabs: tabs.snapshot(), status: sel && sel.status ? sel.status : undefined };
+}
+
+function attachBridgeTab(socket, url) {
+  const requested = url.searchParams.get('tab');
+  // Older extension builds do not send a tab id; give each connection its own.
+  const key = isTabKey(requested) ? requested : 'x' + crypto.randomBytes(5).toString('hex');
+  let replaced = null;
+  try {
+    ({ replaced } = tabs.connect(key, socket));
+  } catch (e) {
+    socket.close(1013, 'too many tabs');
+    return;
+  }
+  // Same tab connected again (page reload): keep the newest socket only.
+  if (replaced) { try { replaced.close(4000, 'replaced'); } catch (_) {} }
+  console.log('[bridge] tab connected: ' + key + ' (' + tabs.connectedCount() + ' open)');
+  syncTabs();
+  try { socket.send(JSON.stringify({ type: 'control', controlled: key === tabs.selectedKey })); } catch (_) {}
+
+  socket.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(String(raw)); } catch { return; }
+    if (msg && msg.type === 'status' && msg.status && typeof msg.status === 'object') {
+      tabs.update(key, msg.status);
+      // Only the controlled tab drives Now Playing; other tabs just update the list.
+      if (key === tabs.selectedKey) {
+        state.lastStatus = msg.status;
+        state.lastStatusAt = Date.now();
+        broadcast({ type: 'status', status: msg.status, bridgeConnected: true });
+      }
+      syncTabs();
+      return;
+    }
+    if (msg && msg.id != null && pending.has(msg.id)) {
+      const p = pending.get(msg.id);
+      if (p.socket !== socket) return;
+      pending.delete(msg.id);
+      clearTimeout(p.timer);
+      if (msg.result && msg.result.status) tabs.update(key, msg.result.status);
+      if (msg.error) p.reject(new Error(msg.error));
+      else p.resolve(msg.result);
+    }
+  });
+
+  socket.on('close', () => {
+    if (tabs.disconnect(key, socket)) console.log('[bridge] tab disconnected: ' + key);
+    for (const [id, p] of pending) {
+      if (p.socket !== socket) continue;
+      pending.delete(id);
+      clearTimeout(p.timer);
+      if (NAVIGATING_ACTIONS.has(p.action)) p.resolve({ ok: true, navigating: true });
+      else p.reject(new Error('The YouTube tab closed or reloaded. Try again.'));
+    }
+    syncTabs();
   });
 }
 
@@ -638,7 +780,7 @@ async function handleApi(req, res, pathname) {
         const status = response.status || response;
         state.lastStatus = status;
         state.lastStatusAt = Date.now();
-        sendJson(res, 200, { bridgeConnected: true, status });
+        sendJson(res, 200, { bridgeConnected: true, status, tabs: tabs.snapshot() });
       } catch (e) {
         sendJson(res, 200, {
           bridgeConnected: state.bridgeConnected || await cdp.isCdpReady(),
@@ -667,6 +809,11 @@ async function handleApi(req, res, pathname) {
         return;
       }
       let payload = body;
+      if (action === 'selectTab') {
+        const tab = body.tab == null || body.tab === '' ? 'auto' : body.tab;
+        if (tab !== 'auto' && !isTabKey(tab)) { sendJson(res, 400, { error: 'Unknown tab' }); return; }
+        payload = { tab, focus: body.focus === true };
+      }
       if (QUEUE_ACTIONS.has(action)) {
         try {
           payload = sanitizeQueueCommand(action, body);
@@ -716,40 +863,7 @@ wss.on('connection', (socket, req) => {
       socket.close(1008, 'bridge must be local');
       return;
     }
-    if (bridgeSocket && bridgeSocket !== socket) {
-      try { bridgeSocket.close(); } catch (_) {}
-    }
-    bridgeSocket = socket;
-    state.bridgeConnected = true;
-    broadcast({ type: 'bridge', bridgeConnected: true });
-    console.log('[bridge] connected');
-
-    socket.on('message', (raw) => {
-      let msg;
-      try { msg = JSON.parse(String(raw)); } catch { return; }
-      if (msg && msg.type === 'status') {
-        state.lastStatus = msg.status;
-        state.lastStatusAt = Date.now();
-        broadcast({ type: 'status', status: msg.status, bridgeConnected: true });
-        return;
-      }
-      if (msg && msg.id != null && pending.has(msg.id)) {
-        const p = pending.get(msg.id);
-        pending.delete(msg.id);
-        clearTimeout(p.timer);
-        if (msg.error) p.reject(new Error(msg.error));
-        else p.resolve(msg.result);
-      }
-    });
-
-    socket.on('close', () => {
-      if (bridgeSocket === socket) {
-        bridgeSocket = null;
-        state.bridgeConnected = false;
-        broadcast({ type: 'bridge', bridgeConnected: false });
-        console.log('[bridge] disconnected');
-      }
-    });
+    attachBridgeTab(socket, url);
     return;
   }
 
@@ -769,6 +883,7 @@ wss.on('connection', (socket, req) => {
     type: 'hello',
     bridgeConnected: state.bridgeConnected,
     status: state.lastStatus,
+    tabs: tabs.snapshot(),
   }));
   socket.on('close', () => uiClients.delete(socket));
 });

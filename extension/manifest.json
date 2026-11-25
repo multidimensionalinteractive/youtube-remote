@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YouTube Remote Bridge",
-  "version": "1.3.0",
-  "description": "Bridges the local YouTube Remote control page to the active YouTube tab, including optional Web Audio bass cut, stop after this video, and a queue.",
+  "version": "1.4.0",
+  "description": "Bridges the local YouTube Remote control page to your open YouTube tabs (pick which one to control), including optional Web Audio bass cut, stop after this video, and a queue.",
   "permissions": [
     "tabs",
     "storage"

@@ -69,3 +69,10 @@ async function reloadYouTubeTabs() {
   }
 }
 chrome.runtime.onInstalled.addListener(() => { reloadYouTubeTabs(); });
+
+// Tells a YouTube tab its own Chrome tab id and window, so the remote can list
+// every open YouTube tab and control the one you pick.
+chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  if (!msg || msg.action !== 'whoAmI' || !sender.tab) return;
+  reply({ tabId: sender.tab.id, windowId: sender.tab.windowId, index: sender.tab.index });
+});

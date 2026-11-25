@@ -101,6 +101,20 @@
   .connect .link { word-break: break-all; font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; background: var(--card2); border-radius: 10px; padding: 8px 10px; }
   .connect ol { margin: 6px 0 0; padding-left: 20px; line-height: 1.5; }
   button.toggle-on { background: linear-gradient(135deg, #1f8f4e, #30d158); color: #04140a; }
+  .tabs-card { display: none; }
+  .tabs-card.show { display: block; }
+  .tabs-card h2 { font-size: 1.05rem; margin: 0; }
+  .tlist { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .titem { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 6px; border-radius: 14px; background: var(--card2); border: 1px solid transparent; }
+  .titem.sel { border-color: var(--good); }
+  .titem img { width: 64px; height: 36px; border-radius: 8px; object-fit: cover; background: #000; }
+  .tpick { appearance: none; background: transparent; border: 0; padding: 0 2px; min-height: 44px; text-align: left; color: var(--text); overflow: hidden; border-radius: 10px; }
+  .tpick .t { font-size: 0.88rem; font-weight: 650; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .tpick .c { color: var(--muted); font-size: 0.75rem; line-height: 1.3; }
+  .titem.sel .tpick .c { color: var(--good); }
+  .tshow { min-height: 36px; padding: 4px 10px; font-size: 0.8rem; background: var(--card); }
+  .tauto { width: 100%; margin-top: 10px; min-height: 40px; font-size: 0.85rem; }
+  .tnotice { color: #ffd60a; font-size: 0.82rem; text-align: center; margin: 0; }
 </style>
 </head>
 <body>
@@ -108,6 +122,18 @@
     <h1 style="text-align:center;width:100%;margin:4px 0;">YouTube Remote</h1>
     <div class="row" style="justify-content:center;flex-wrap:wrap;">
       <button id="btnRefresh" type="button" class="pill" title="Tap to wake PC, show YouTube and refresh" aria-label="Connection status, tap to wake PC, show YouTube and refresh" style="cursor:pointer;"><span id="dot" class="dot off"></span><span id="bridgeLabel">Bridge offline</span><span aria-hidden="true" style="opacity:.55;">↻</span></button>
+      <button id="btnTabs" type="button" class="pill" aria-expanded="false" aria-controls="tabsCard" title="Pick which YouTube tab to control" style="cursor:pointer;" hidden><span aria-hidden="true">▤</span><span id="tabsLabel">Tabs</span></button>
+    </div>
+    <p id="tabNotice" class="tnotice" role="status" hidden></p>
+    <div id="tabsCard" class="card tabs-card" aria-label="Open YouTube tabs">
+      <div class="qhead" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <h2>YouTube tabs on the PC</h2>
+        <button id="tabsClose" type="button" style="min-height:36px;padding:6px 12px;font-size:0.85rem;">Done</button>
+      </div>
+      <div class="meta" style="margin-top:6px;">Tap a tab to control it. Everything on this remote then goes to that tab only.</div>
+      <div id="tabsList" class="tlist"></div>
+      <button id="tabsAuto" type="button" class="tauto">Auto: follow whatever is playing</button>
+      <div id="tabsErr" class="err" style="margin-top:8px;"></div>
     </div>
 
     <div id="connectBox" class="card connect" aria-live="polite">
@@ -134,7 +160,7 @@
       </form>
       <div id="searchErr" class="err" style="margin-top:8px;"></div>
       <div id="results" class="results" style="margin-top:10px;"></div>
-      <p class="hint" style="margin-top:10px;">Tip: keep a YouTube tab open on the PC. Tap a result to play it now, or use Play next / Add to queue to line it up. Playing a result closes duplicate YouTube tabs when the extension bridge is connected.</p>
+      <p class="hint" style="margin-top:10px;">Tip: keep a YouTube tab open on the PC. Tap a result to play it now, or use Play next / Add to queue to line it up. If several YouTube tabs are open, tap the tabs button at the top to pick which one this remote controls.</p>
     </div>
 
     <div class="card">
@@ -505,6 +531,106 @@ async function command(action, extra = {}) {
   }
 }
 
+// ---------------------------------------------------------------- Tab picker
+// The PC can have several YouTube tabs open. The server tracks all of them and
+// the remote controls one at a time. Picking a tab here is remembered on the PC.
+const tabsUi = { data: null, busy: false };
+
+function tabWindowNames(list) {
+  const ids = [...new Set(list.map((t) => t.windowId).filter((w) => w != null))].sort((a, b) => a - b);
+  const names = new Map();
+  ids.forEach((id, i) => names.set(id, 'Window ' + (i + 1)));
+  return names;
+}
+
+function renderTabs(snap) {
+  if (!snap || !Array.isArray(snap.tabs)) return;
+  tabsUi.data = snap;
+  const list = snap.tabs;
+  const btn = $('btnTabs');
+  btn.hidden = list.length === 0;
+  $('tabsLabel').textContent = list.length === 1 ? '1 tab' : list.length + ' tabs';
+  const notice = $('tabNotice');
+  notice.textContent = snap.notice || '';
+  notice.hidden = !snap.notice;
+  if (tabsUi.busy) return;
+  const names = tabWindowNames(list);
+  const showWindows = names.size > 1;
+  const box = $('tabsList');
+  box.textContent = '';
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'meta';
+    empty.textContent = 'No YouTube tabs are open on the PC.';
+    box.appendChild(empty);
+  }
+  for (const t of list) {
+    const row = document.createElement('div');
+    row.className = 'titem' + (t.selected ? ' sel' : '');
+    const img = document.createElement('img');
+    img.alt = '';
+    img.src = t.videoId ? 'https://i.ytimg.com/vi/' + encodeURIComponent(t.videoId) + '/mqdefault.jpg'
+      : "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='36'%3E%3Crect width='100%25' height='100%25' fill='%23000'/%3E%3C/svg%3E";
+    const pick = document.createElement('button');
+    pick.type = 'button';
+    pick.className = 'tpick';
+    pick.setAttribute('aria-pressed', t.selected ? 'true' : 'false');
+    const title = document.createElement('div');
+    title.className = 't';
+    title.textContent = t.title || 'YouTube';
+    const meta = document.createElement('div');
+    meta.className = 'c';
+    const bits = [];
+    if (t.selected) bits.push(snap.pinned ? 'Controlling' : 'Controlling (auto)');
+    if (!t.connected) bits.push('Reconnecting');
+    else bits.push(t.videoId ? (t.paused ? 'Paused' : 'Playing') : 'Not on a video');
+    if (showWindows && t.windowId != null) bits.push(names.get(t.windowId));
+    if (t.focused) bits.push('In front');
+    meta.textContent = bits.join(' \u00b7 ');
+    pick.append(title, meta);
+    pick.addEventListener('click', () => chooseTab(t.key, false, pick));
+    const show = document.createElement('button');
+    show.type = 'button';
+    show.className = 'tshow';
+    show.textContent = 'Show on PC';
+    show.title = 'Control this tab and bring it to the front on the PC';
+    show.addEventListener('click', () => chooseTab(t.key, true, show));
+    row.append(img, pick, show);
+    box.appendChild(row);
+  }
+  const auto = $('tabsAuto');
+  auto.classList.toggle('toggle-on', !snap.pinned);
+  auto.textContent = snap.pinned ? 'Switch to Auto: follow whatever is playing' : 'Auto is on: following whatever is playing';
+}
+
+async function chooseTab(key, focus, el) {
+  $('tabsErr').textContent = '';
+  if (el) el.disabled = true;
+  tabsUi.busy = true;
+  try {
+    const data = await command('selectTab', { tab: key, focus: !!focus });
+    tabsUi.busy = false;
+    if (data && data.result && data.result.tabs) renderTabs(data.result.tabs);
+    if (key !== 'auto' && !focus) setTimeout(() => toggleTabs(false), 350);
+  } catch (e) {
+    $('tabsErr').textContent = e.message || String(e);
+  } finally {
+    tabsUi.busy = false;
+    if (el) el.disabled = false;
+  }
+}
+
+function toggleTabs(open) {
+  const card = $('tabsCard');
+  const show = open == null ? !card.classList.contains('show') : !!open;
+  card.classList.toggle('show', show);
+  $('btnTabs').setAttribute('aria-expanded', show ? 'true' : 'false');
+  if (show && tabsUi.data) renderTabs(tabsUi.data);
+}
+$('btnTabs').onclick = () => toggleTabs();
+$('tabsClose').onclick = () => toggleTabs(false);
+$('tabsAuto').onclick = () => chooseTab('auto', false, $('tabsAuto'));
+
 function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const token = getToken();
@@ -512,6 +638,7 @@ function connectWs() {
   const ws = new WebSocket(proto + '://' + location.host + '/' + q);
   ws.onmessage = (ev) => {
     let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.tabs) renderTabs(msg.tabs);
     if (msg.type === 'hello' || msg.type === 'bridge') setBridge(msg.bridgeConnected);
     if (msg.type === 'basic') setBridge(false, msg.basicMode);
     if (msg.status) renderStatus(msg.status);
@@ -657,6 +784,7 @@ async function refresh() {
     const data = await api('/api/status');
     setBridge(data.bridgeConnected, data.basicMode);
     if (data.status) renderStatus(data.status);
+    if (data.tabs) renderTabs(data.tabs);
   } catch (_) {}
 }
 

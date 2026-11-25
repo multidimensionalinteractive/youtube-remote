@@ -8,6 +8,44 @@
   let reconnectTimer = null;
   let statusTimer = null;
 
+  // ------------------------------------------------------------ Tab identity
+  // Every open YouTube tab connects its own bridge socket, tagged with its
+  // Chrome tab id, and the server decides which tab the remote controls.
+  // Only the controlled tab runs the queue auto-advance and Stop after.
+  let tabKey = null;
+  let tabInfo = {};
+  let controlled = true; // until the server says otherwise (older servers never do)
+  let connecting = false;
+  let stopReconnecting = false;
+  let statusPushes = 0;
+
+  function extensionAlive() {
+    try { return !!(chrome && chrome.runtime && chrome.runtime.id); } catch (_) { return false; }
+  }
+  function fallbackTabKey() {
+    const make = () => 's' + Math.random().toString(36).slice(2, 12);
+    try {
+      let k = sessionStorage.getItem('ytRemoteTabKey');
+      if (!k || !/^[A-Za-z0-9_-]{1,40}$/.test(k)) { k = make(); sessionStorage.setItem('ytRemoteTabKey', k); }
+      return k;
+    } catch (_) { return make(); }
+  }
+  async function whoAmI() {
+    try {
+      const r = await chrome.runtime.sendMessage({ action: 'whoAmI' });
+      if (r && Number.isInteger(r.tabId)) {
+        tabInfo = { windowId: Number.isInteger(r.windowId) ? r.windowId : null, index: Number.isInteger(r.index) ? r.index : null };
+        return 't' + r.tabId;
+      }
+    } catch (_) {}
+    return null;
+  }
+  function tabStatus() {
+    let focused = false;
+    try { focused = document.hasFocus(); } catch (_) {}
+    return { windowId: tabInfo.windowId, index: tabInfo.index, visible: document.visibilityState === 'visible', focused };
+  }
+
   // Desired loudness (0–1). While the Web Audio graph is active, GainNode is the authority;
   // element/player volume reads after createMediaElementSource are not trustworthy.
   let lastKnownVolume = 0.75;
@@ -25,6 +63,16 @@
         stopAfter = !!(r && r.stopAfterThisVideo);
         try { sessionStorage.setItem('ytRemoteStopAfter', stopAfter ? '1' : '0'); } catch (_) {}
         wireStopAfterHandlers();
+      });
+    }
+  } catch (_) {}
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local' || !changes.stopAfterThisVideo) return;
+        stopAfter = !!changes.stopAfterThisVideo.newValue;
+        try { sessionStorage.setItem('ytRemoteStopAfter', stopAfter ? '1' : '0'); } catch (_) {}
       });
     }
   } catch (_) {}
@@ -129,7 +177,7 @@
   }
 
   function enforceStopAtEnd() {
-    if (!stopAfter) return;
+    if (!stopAfter || !controlled) return;
     if (isAdPlaying()) return;
     const v = videoEl();
     if (!v || !isFinite(v.duration) || v.duration < 2) return;
@@ -144,7 +192,7 @@
   }
 
   function onVideoEnded(ev) {
-    if (!stopAfter) return;
+    if (!stopAfter || !controlled) return;
     if (isAdPlaying()) return;
     const v = ev && ev.target ? ev.target : videoEl();
     stopAfterGuardUntil = Date.now() + 8000;
@@ -159,7 +207,7 @@
   }
 
   function onStopAfterPlay(ev) {
-    if (!stopAfter) return;
+    if (!stopAfter || !controlled) return;
     if (Date.now() > stopAfterGuardUntil) return;
     const t = ev && ev.target;
     if (!t || (t.tagName !== 'VIDEO' && t.tagName !== 'AUDIO')) return;
@@ -194,7 +242,7 @@
       stopAfterTimer = setInterval(() => {
         try {
           maybeAdvanceQueue(false);
-          if (!stopAfter) return;
+          if (!stopAfter || !controlled) return;
           enforceStopAtEnd();
           if (Date.now() < stopAfterGuardUntil) cancelUpNext();
         } catch (_) {}
@@ -320,6 +368,7 @@
 
   // Called on timeupdate, on ended, and every 200ms.
   function maybeAdvanceQueue(ended) {
+    if (!controlled) return;
     const v = videoEl();
     const queue = loadQueue();
     const go = Q.shouldAdvance({
@@ -444,6 +493,9 @@
       gain: bassState.gain ? bassState.gain.gain.value : null,
       stopAfter: !!stopAfter,
       ...queueStatus(),
+      tab: tabStatus(),
+      tabKey,
+      controlled,
     };
   }
 
@@ -644,10 +696,6 @@
     if (['load','play','togglePlay','showYouTube'].includes(action)) {
       await chrome.runtime.sendMessage({ action: 'focusYouTube' });
     }
-    if (['load','play','togglePlay'].includes(action)) {
-      const cleanup = await chrome.runtime.sendMessage({action:'cleanupYouTube'});
-      if (cleanup && cleanup.error) throw new Error(cleanup.error);
-    }
     switch (action) {
       case 'reloadExtension':
         return await chrome.runtime.sendMessage({action:'reloadExtension'});
@@ -771,19 +819,27 @@
 
   function pushStatus() {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    // Refresh the window id now and then (tabs can be dragged between windows).
+    statusPushes += 1;
+    if (statusPushes % 8 === 0 && extensionAlive()) whoAmI();
     try {
       socket.send(JSON.stringify({ type: 'status', status: getStatus() }));
     } catch (_) {}
   }
 
-  function connect() {
+  async function connect() {
     if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+    if (connecting || stopReconnecting || !extensionAlive()) return;
+    connecting = true;
     try {
-      socket = new WebSocket(BRIDGE_URL);
+      if (!tabKey) tabKey = (await whoAmI()) || fallbackTabKey();
+      socket = new WebSocket(BRIDGE_URL + '&tab=' + encodeURIComponent(tabKey));
     } catch (_) {
+      connecting = false;
       scheduleReconnect();
       return;
     }
+    connecting = false;
 
     socket.onopen = () => {
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -795,6 +851,12 @@
     socket.onmessage = async (ev) => {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg && msg.type === 'control') {
+        const was = controlled;
+        controlled = !!msg.controlled;
+        if (controlled && !was) { wireStopAfterHandlers(); if (stopAfter) enforceStopAtEnd(); }
+        return;
+      }
       if (msg.id == null || !msg.action) return;
       try {
         const result = await handle(msg);
@@ -808,8 +870,10 @@
       }
     };
 
-    socket.onclose = () => {
+    socket.onclose = (ev) => {
       if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+      // 4000: a newer connection from this same tab took over. Do not fight it.
+      if (ev && ev.code === 4000) { stopReconnecting = true; return; }
       scheduleReconnect();
     };
 
@@ -819,7 +883,7 @@
   }
 
   function scheduleReconnect() {
-    if (reconnectTimer) return;
+    if (reconnectTimer || stopReconnecting || !extensionAlive()) return;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connect();
